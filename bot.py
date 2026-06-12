@@ -13,7 +13,7 @@ ADMIN_ID = os.environ.get("ADMIN_ID")  # your personal Telegram user ID
 
 # ─── RATE STORAGE (in memory, survives restarts via file) ──
 RATE_FILE = "usd_iqd_rate.txt"
-DEFAULT_RATE = 155250
+DEFAULT_RATE = 1552.50
 
 def save_rate(rate):
     with open(RATE_FILE, "w") as f:
@@ -94,7 +94,7 @@ def build_message(gold_oz, silver_oz, usd_iqd, gold_iqd):
         f"   ئۆنسێک ➜ ${silver_oz:,.2f}\n"
         f"   یەک کیلۆ ➜ ${silver_kg_usd:,.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 نرخی دۆلار  ►  {usd_iqd:,.0f} دینار"
+        f"💵 نرخی دۆلار  ►  {usd_iqd*100:,.0f} دینار (بۆ 100$)"
     )
     return msg
 
@@ -122,7 +122,7 @@ async def cmd_setrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args or len(context.args) != 1:
-        await update.message.reply_text("⚠️ نمونە: /setrate 155250")
+        await update.message.reply_text("⚠️ نمونە: /setrate 1552.50  (نرخی 1 دۆلار بنووسە)")
         return
 
     try:

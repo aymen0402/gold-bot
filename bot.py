@@ -9,11 +9,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # ─── CONFIG ───────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-ADMIN_ID = os.environ.get("ADMIN_ID")  # your personal Telegram user ID
+ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# ─── RATE STORAGE (in memory, survives restarts via file) ──
+# ─── FILE STORAGE ─────────────────────────────────────────
 RATE_FILE = "usd_iqd_rate.txt"
+INTERVAL_FILE = "interval_minutes.txt"
 DEFAULT_RATE = 1552.50
+DEFAULT_INTERVAL = 60  # minutes
 
 def save_rate(rate):
     with open(RATE_FILE, "w") as f:
@@ -25,6 +27,17 @@ def load_rate():
             return float(f.read().strip())
     except Exception:
         return float(DEFAULT_RATE)
+
+def save_interval(minutes):
+    with open(INTERVAL_FILE, "w") as f:
+        f.write(str(minutes))
+
+def load_interval():
+    try:
+        with open(INTERVAL_FILE, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return DEFAULT_INTERVAL
 
 # ─── PRICE FETCHING ───────────────────────────────────────
 
@@ -98,7 +111,7 @@ def build_message(gold_oz, silver_oz, usd_iqd, gold_iqd):
     )
     return msg
 
-# ─── SEND HOURLY UPDATE ───────────────────────────────────
+# ─── SEND UPDATE ──────────────────────────────────────────
 
 async def send_price_update(bot):
     try:
@@ -111,44 +124,90 @@ async def send_price_update(bot):
     except Exception as e:
         print(f"❌ Error: {e}")
 
-# ─── TELEGRAM COMMANDS ────────────────────────────────────
+# ─── ADMIN CHECK ──────────────────────────────────────────
+
+def is_admin(update: Update):
+    return not ADMIN_ID or str(update.effective_user.id) == ADMIN_ID
+
+# ─── COMMANDS ─────────────────────────────────────────────
 
 async def cmd_setrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Only admin can set the rate. Usage: /setrate 155250"""
-    user_id = str(update.effective_user.id)
-
-    if ADMIN_ID and user_id != ADMIN_ID:
+    if not is_admin(update):
         await update.message.reply_text("❌ تۆ مۆڵەتت نییە ئەم فەرمانە بەکاربهێنیت.")
         return
-
     if not context.args or len(context.args) != 1:
-        await update.message.reply_text("⚠️ نمونە: /setrate 1552.50  (نرخی 1 دۆلار بنووسە)")
+        await update.message.reply_text("⚠️ نمونە: /setrate 1552.50")
         return
-
     try:
         new_rate = float(context.args[0].replace(",", ""))
         save_rate(new_rate)
         await update.message.reply_text(
             f"✅ نرخی دۆلار نوێ کرایەوە!\n"
-            f"💵 1 دۆلار = {new_rate:,.0f} دینار"
+            f"💵 100 دۆلار = {new_rate*100:,.0f} دینار"
         )
-        print(f"✅ Rate updated to {new_rate}")
     except ValueError:
-        await update.message.reply_text("❌ ژمارەیەکی دروست بنووسە. نمونە: /setrate 155250")
+        await update.message.reply_text("❌ ژمارەیەکی دروست بنووسە. نمونە: /setrate 1552.50")
+
+async def cmd_setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE, scheduler: AsyncIOScheduler, bot):
+    if not is_admin(update):
+        await update.message.reply_text("❌ تۆ مۆڵەتت نییە ئەم فەرمانە بەکاربهێنیت.")
+        return
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text("⚠️ نمونە: /setinterval 30  (ژمارە بە خولەک)")
+        return
+    try:
+        minutes = int(context.args[0])
+        if minutes < 5:
+            await update.message.reply_text("❌ کەمترین ماوە 5 خولەکە.")
+            return
+        save_interval(minutes)
+
+        # Reschedule the job
+        scheduler.remove_all_jobs()
+        scheduler.add_job(send_price_update, "interval", minutes=minutes, args=[bot])
+
+        if minutes >= 60 and minutes % 60 == 0:
+            display = f"{minutes // 60} کاتژمێر"
+        else:
+            display = f"{minutes} خولەک"
+
+        await update.message.reply_text(
+            f"✅ ماوەی نێردن نوێ کرایەوە!\n"
+            f"🕐 ئێستا هەر {display} یەک نرخەکان دەنێردرێن"
+        )
+    except ValueError:
+        await update.message.reply_text("❌ ژمارەیەکی دروست بنووسە. نمونە: /setinterval 30")
 
 async def cmd_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current rate."""
     rate = load_rate()
-    await update.message.reply_text(f"💵 نرخی ئێستای دۆلار: {rate:,.0f} دینار")
+    await update.message.reply_text(f"💵 نرخی ئێستای دۆلار: {rate*100:,.0f} دینار (بۆ 100$)")
+
+async def cmd_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    minutes = load_interval()
+    if minutes >= 60 and minutes % 60 == 0:
+        display = f"{minutes // 60} کاتژمێر"
+    else:
+        display = f"{minutes} خولەک"
+    await update.message.reply_text(f"🕐 ماوەی ئێستا: هەر {display} یەک")
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send price update immediately on demand."""
-    user_id = str(update.effective_user.id)
-    if ADMIN_ID and user_id != ADMIN_ID:
+    if not is_admin(update):
         await update.message.reply_text("❌ تۆ مۆڵەتت نییە ئەم فەرمانە بەکاربهێنیت.")
         return
     await update.message.reply_text("⏳ چاوەڕێ بکە...")
     await send_price_update(context.bot)
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "🤖 فەرمانەکانی بۆت:\n\n"
+        "/setrate 1552.50 — نرخی دۆلار بگۆڕە\n"
+        "/rate — نرخی ئێستای دۆلار ببینە\n"
+        "/setinterval 30 — ماوەی نێردن بگۆڕە (بە خولەک)\n"
+        "/interval — ماوەی ئێستا ببینە\n"
+        "/price — ئێستا نرخەکان بنێرە\n"
+        "/help — ئەم لیستە نیشان بدە"
+    )
+    await update.message.reply_text(msg)
 
 # ─── MAIN ─────────────────────────────────────────────────
 
@@ -156,25 +215,30 @@ async def main():
     print("🚀 Gold & Silver Bot started!")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    scheduler = AsyncIOScheduler()
 
+    # Register commands
     app.add_handler(CommandHandler("setrate", cmd_setrate))
     app.add_handler(CommandHandler("rate", cmd_rate))
     app.add_handler(CommandHandler("price", cmd_price))
+    app.add_handler(CommandHandler("interval", cmd_interval))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("setinterval",
+        lambda u, c: cmd_setinterval(u, c, scheduler, app.bot)))
 
     # Send first message on startup
     await send_price_update(app.bot)
 
-    # Schedule hourly updates
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_price_update, "interval", hours=1, args=[app.bot])
+    # Schedule updates
+    interval = load_interval()
+    scheduler.add_job(send_price_update, "interval", minutes=interval, args=[app.bot])
     scheduler.start()
+    print(f"⏰ Scheduled every {interval} minutes")
 
-    # Start bot polling
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-
-    print("🤖 Bot is running and listening for commands...")
+    print("🤖 Bot is running!")
 
     while True:
         await asyncio.sleep(60)

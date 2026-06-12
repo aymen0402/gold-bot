@@ -12,20 +12,17 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")  # e.g. @yourchannel or -100xxxxxxxxxx
 # ─── PRICE FETCHING ───────────────────────────────────────
 
 async def get_metals_prices():
-    """Fetch live gold and silver prices in USD per oz from metals-api or fallback."""
-    url = "https://api.metals.live/v1/spot"
+    """Fetch live gold and silver prices in USD per oz from frankfurter/commodity API."""
+    url = "https://api.gold-api.com/price/XAU"
+    url_silver = "https://api.gold-api.com/price/XAG"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
-            # data is a list of dicts like [{"gold": 3200}, {"silver": 32}, ...]
-            gold = None
-            silver = None
-            for item in data:
-                if "gold" in item:
-                    gold = float(item["gold"])
-                if "silver" in item:
-                    silver = float(item["silver"])
-            return gold, silver
+            gold = float(data["price"])
+        async with session.get(url_silver, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json()
+            silver = float(data["price"])
+    return gold, silver
 
 async def get_usd_iqd_rate():
     """Fetch live USD to IQD exchange rate."""

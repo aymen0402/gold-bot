@@ -2,21 +2,37 @@ import os
 import asyncio
 import aiohttp
 from datetime import datetime
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ─── CONFIG ───────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHANNEL_ID = os.environ.get("CHANNEL_ID")  # e.g. @yourchannel or -100xxxxxxxxxx
+CHANNEL_ID = os.environ.get("CHANNEL_ID")
+ADMIN_ID = os.environ.get("ADMIN_ID")  # your personal Telegram user ID
+
+# ─── RATE STORAGE (in memory, survives restarts via file) ──
+RATE_FILE = "usd_iqd_rate.txt"
+DEFAULT_RATE = 155250
+
+def save_rate(rate):
+    with open(RATE_FILE, "w") as f:
+        f.write(str(rate))
+
+def load_rate():
+    try:
+        with open(RATE_FILE, "r") as f:
+            return float(f.read().strip())
+    except Exception:
+        return float(DEFAULT_RATE)
 
 # ─── PRICE FETCHING ───────────────────────────────────────
 
 async def get_metals_prices():
-    """Fetch live gold and silver prices in USD per oz from frankfurter/commodity API."""
-    url = "https://api.gold-api.com/price/XAU"
+    url_gold = "https://api.gold-api.com/price/XAU"
     url_silver = "https://api.gold-api.com/price/XAG"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url_gold, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json()
             gold = float(data["price"])
         async with session.get(url_silver, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -24,120 +40,142 @@ async def get_metals_prices():
             silver = float(data["price"])
     return gold, silver
 
-async def get_usd_iqd_rate():
-    """Fetch live USD to IQD exchange rate."""
-    url = "https://api.exchangerate-api.com/v4/latest/USD"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            data = await resp.json()
-            return float(data["rates"]["IQD"])
-
 # ─── CALCULATIONS ─────────────────────────────────────────
 
 def calculate_gold(gold_oz_usd, usd_iqd):
-    """Calculate gold prices per mithqal for different ayar."""
-    gram = gold_oz_usd / 31.1          # price per gram ayar 24
-    mithqal_24 = gram * 5              # 1 mithqal = 5 grams
-
+    gram = gold_oz_usd / 31.1
+    mithqal_24 = gram * 5
     ayar = {
         24: mithqal_24,
         22: mithqal_24 * 0.9167,
         21: mithqal_24 * 0.875,
         18: mithqal_24 * 0.750,
     }
-
-    # Convert to IQD and round to nearest thousand
     ayar_iqd = {}
     for k, v in ayar.items():
         iqd = v * usd_iqd
-        ayar_iqd[k] = round(iqd / 1000) * 1000  # round to nearest 1000
-
+        ayar_iqd[k] = round(iqd / 1000) * 1000
     return ayar_iqd
 
-def calculate_silver(silver_oz_usd, usd_iqd):
-    """Calculate silver price per kg in IQD."""
+def calculate_silver_usd(silver_oz_usd):
     per_gram = silver_oz_usd / 31.1
-    per_kg_usd = per_gram * 1000
-    per_kg_iqd = per_kg_usd * usd_iqd
-    return round(per_kg_iqd / 1000) * 1000
+    per_kg = per_gram * 1000
+    return round(per_kg, 2)
 
-def format_number(n):
-    """Format number nicely: 1,250,000 → 1.250 ملیۆن or 892,000 → 892 هەزار"""
+def format_iqd(n):
     if n >= 1_000_000:
         val = n / 1_000_000
-        if val == int(val):
-            return f"{int(val)} ملیۆن"
-        else:
-            return f"{val:.3f} ملیۆن"
+        return f"{int(val)} ملیۆن" if val == int(val) else f"{val:.3f} ملیۆن"
     elif n >= 1_000:
         val = n / 1_000
-        if val == int(val):
-            return f"{int(val)} هەزار"
-        else:
-            return f"{val:.1f} هەزار"
-    else:
-        return f"{n:,.0f}"
+        return f"{int(val)} هەزار" if val == int(val) else f"{val:.0f} هەزار"
+    return f"{n:,.0f}"
 
 # ─── MESSAGE BUILDER ──────────────────────────────────────
 
-def build_message(gold_oz, silver_oz, usd_iqd, gold_iqd, silver_kg_iqd):
+def build_message(gold_oz, silver_oz, usd_iqd, gold_iqd):
     now = datetime.now()
-    date_str = now.strftime("%d - %m - %Y")
-
-    usd_iqd_formatted = f"{usd_iqd:,.0f}"
-    gold_oz_formatted = f"{gold_oz:,.2f}"
-    silver_oz_formatted = f"{silver_oz:,.2f}"
+    date_str = now.strftime("%d / %m / %Y")
+    time_str = now.strftime("%H:%M")
+    silver_kg_usd = calculate_silver_usd(silver_oz)
 
     msg = (
-        f"☀️ ئەمڕۆ {date_str}\n"
-        f"▪️ ئۆنسەی زێر {gold_oz_formatted} دۆلار\n"
-        f"─────────────────────────────\n"
-        f"🔹 زێڕی عەیار 24 بە {format_number(gold_iqd[24])} دینار\n"
-        f"🔹 زێڕی عەیار 22 بە {format_number(gold_iqd[22])} دینار\n"
-        f"🔹 زێڕی عەیار 21 بە {format_number(gold_iqd[21])} دینار\n"
-        f"🔹 زێڕی عەیار 18 بە {format_number(gold_iqd[18])} دینار\n"
-        f"─────────────────────────────\n"
-        f"🔸 نرخی یەک کیلۆ زیو بە {format_number(silver_kg_iqd)} دینار\n"
-        f"▪️ ئۆنسەی زیو {silver_oz_formatted} دۆلار\n"
-        f"─────────────────────────────\n"
-        f"❇️ نرخی دۆلار ‌•••‌••• {usd_iqd_formatted} دینار"
+        f"🗓 {date_str}   🕐 {time_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 نرخی زێڕ\n"
+        f"   ئۆنسێک ➜ ${gold_oz:,.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💛 عەیار ٢٤  ►  {format_iqd(gold_iqd[24])} دینار\n"
+        f"🟡 عەیار ٢٢  ►  {format_iqd(gold_iqd[22])} دینار\n"
+        f"🟠 عەیار ٢١  ►  {format_iqd(gold_iqd[21])} دینار\n"
+        f"🔶 عەیار ١٨  ►  {format_iqd(gold_iqd[18])} دینار\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🥈 نرخی زیو\n"
+        f"   ئۆنسێک ➜ ${silver_oz:,.2f}\n"
+        f"   یەک کیلۆ ➜ ${silver_kg_usd:,.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 نرخی دۆلار  ►  {usd_iqd:,.0f} دینار"
     )
     return msg
 
-# ─── SEND MESSAGE ─────────────────────────────────────────
+# ─── SEND HOURLY UPDATE ───────────────────────────────────
 
-async def send_price_update():
+async def send_price_update(bot):
     try:
         gold_oz, silver_oz = await get_metals_prices()
-        usd_iqd = await get_usd_iqd_rate()
-
-        if not gold_oz or not silver_oz or not usd_iqd:
-            print("⚠️ Failed to fetch prices")
-            return
-
+        usd_iqd = load_rate()
         gold_iqd = calculate_gold(gold_oz, usd_iqd)
-        silver_kg_iqd = calculate_silver(silver_oz, usd_iqd)
-
-        message = build_message(gold_oz, silver_oz, usd_iqd, gold_iqd, silver_kg_iqd)
-
-        bot = Bot(token=TELEGRAM_TOKEN)
+        message = build_message(gold_oz, silver_oz, usd_iqd, gold_iqd)
         await bot.send_message(chat_id=CHANNEL_ID, text=message)
         print(f"✅ Message sent at {datetime.now().strftime('%H:%M:%S')}")
-
     except Exception as e:
         print(f"❌ Error: {e}")
+
+# ─── TELEGRAM COMMANDS ────────────────────────────────────
+
+async def cmd_setrate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Only admin can set the rate. Usage: /setrate 155250"""
+    user_id = str(update.effective_user.id)
+
+    if ADMIN_ID and user_id != ADMIN_ID:
+        await update.message.reply_text("❌ تۆ مۆڵەتت نییە ئەم فەرمانە بەکاربهێنیت.")
+        return
+
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text("⚠️ نمونە: /setrate 155250")
+        return
+
+    try:
+        new_rate = float(context.args[0].replace(",", ""))
+        save_rate(new_rate)
+        await update.message.reply_text(
+            f"✅ نرخی دۆلار نوێ کرایەوە!\n"
+            f"💵 1 دۆلار = {new_rate:,.0f} دینار"
+        )
+        print(f"✅ Rate updated to {new_rate}")
+    except ValueError:
+        await update.message.reply_text("❌ ژمارەیەکی دروست بنووسە. نمونە: /setrate 155250")
+
+async def cmd_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current rate."""
+    rate = load_rate()
+    await update.message.reply_text(f"💵 نرخی ئێستای دۆلار: {rate:,.0f} دینار")
+
+async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send price update immediately on demand."""
+    user_id = str(update.effective_user.id)
+    if ADMIN_ID and user_id != ADMIN_ID:
+        await update.message.reply_text("❌ تۆ مۆڵەتت نییە ئەم فەرمانە بەکاربهێنیت.")
+        return
+    await update.message.reply_text("⏳ چاوەڕێ بکە...")
+    await send_price_update(context.bot)
 
 # ─── MAIN ─────────────────────────────────────────────────
 
 async def main():
     print("🚀 Gold & Silver Bot started!")
-    await send_price_update()  # send immediately on start
 
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("setrate", cmd_setrate))
+    app.add_handler(CommandHandler("rate", cmd_rate))
+    app.add_handler(CommandHandler("price", cmd_price))
+
+    # Send first message on startup
+    await send_price_update(app.bot)
+
+    # Schedule hourly updates
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_price_update, "interval", hours=1)
+    scheduler.add_job(send_price_update, "interval", hours=1, args=[app.bot])
     scheduler.start()
 
-    # Keep running forever
+    # Start bot polling
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    print("🤖 Bot is running and listening for commands...")
+
     while True:
         await asyncio.sleep(60)
 

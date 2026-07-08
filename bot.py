@@ -4,7 +4,7 @@ import aiohttp
 import json
 from datetime import datetime, timedelta
 import pytz
-from telegram import Bot, Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -22,9 +22,13 @@ RATE_FILE = "usd_iqd_rate.txt"
 INTERVAL_FILE = "interval_minutes.txt"
 WEEK_DATA_FILE = "week_data.json"
 LAST_PRICES_FILE = "last_prices.json"
+RATE_META_FILE = "usd_iqd_rate_meta.json"
 
 DEFAULT_RATE = 1552.50
 DEFAULT_INTERVAL = 60
+RATE_CACHE_MINUTES = 180
+GOLD_ALERT_USD = 50
+SILVER_ALERT_USD = 2
 
 # Market holidays (month, day)
 MARKET_HOLIDAYS = [
@@ -38,12 +42,35 @@ def save_rate(rate):
     with open(RATE_FILE, "w") as f:
         f.write(str(rate))
 
+def save_rate_meta(source):
+    data = {
+        "source": source,
+        "updated_at": datetime.now(LONDON_TZ).isoformat()
+    }
+    with open(RATE_META_FILE, "w") as f:
+        json.dump(data, f)
+
+def load_rate_meta():
+    try:
+        with open(RATE_META_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"source": "manual/default", "updated_at": ""}
+
 def load_rate():
     try:
         with open(RATE_FILE, "r") as f:
             return float(f.read().strip())
-    except:
+    except Exception:
         return DEFAULT_RATE
+
+def cached_rate_is_fresh():
+    meta = load_rate_meta()
+    try:
+        updated_at = datetime.fromisoformat(meta.get("updated_at", ""))
+        return datetime.now(LONDON_TZ) - updated_at < timedelta(minutes=RATE_CACHE_MINUTES)
+    except Exception:
+        return False
 
 def save_interval(minutes):
     with open(INTERVAL_FILE, "w") as f:
@@ -110,6 +137,14 @@ def is_weekend_now():
         return True
     return False
 
+def market_status_text():
+    now = datetime.now(LONDON_TZ)
+    if is_market_open(now):
+        return "🟢 کراوە | Open"
+    if is_market_holiday(now):
+        return "🔴 پشووی بازاڕ | Market holiday"
+    return "🌙 داخراوە | Closed"
+
 # ─── PRICE FETCHING ───────────────────────────────────────
 
 async def get_metals_prices():
@@ -117,12 +152,45 @@ async def get_metals_prices():
     url_silver = "https://api.gold-api.com/price/XAG"
     async with aiohttp.ClientSession() as session:
         async with session.get(url_gold, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            resp.raise_for_status()
             data = await resp.json()
             gold = float(data["price"])
         async with session.get(url_silver, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            resp.raise_for_status()
             data = await resp.json()
             silver = float(data["price"])
     return gold, silver
+
+async def fetch_usd_iqd_rate():
+    """Fetch live IQD per 1 USD. Falls back to the saved/manual rate on failure."""
+    urls = [
+        ("open.er-api.com", "https://open.er-api.com/v6/latest/USD"),
+        ("exchange-api.com", "https://api.exchangerate-api.com/v4/latest/USD"),
+    ]
+    async with aiohttp.ClientSession() as session:
+        for source, url in urls:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    iqd = data.get("rates", {}).get("IQD")
+                    if iqd:
+                        return float(iqd), source
+            except Exception as e:
+                print(f"⚠️ USD/IQD fetch failed from {source}: {e}")
+    raise RuntimeError("Could not fetch USD/IQD rate")
+
+async def get_usd_iqd_rate(force_refresh=False):
+    if not force_refresh and cached_rate_is_fresh():
+        return load_rate(), load_rate_meta().get("source", "cache")
+    try:
+        rate, source = await fetch_usd_iqd_rate()
+        save_rate(rate)
+        save_rate_meta(source)
+        return rate, source
+    except Exception as e:
+        print(f"⚠️ Using saved USD/IQD rate: {e}")
+        return load_rate(), "saved/manual"
 
 # ─── AI NEWS FETCH ────────────────────────────────────────
 
@@ -240,45 +308,44 @@ def trend_emoji(current, previous):
     if diff > 0:
         return f"📈 +${diff:.2f}"
     elif diff < 0:
-        return f"📉 ${diff:.2f}"
+        return f"📉 -${abs(diff):.2f}"
     return "➡️ بێ گۆڕان"
 
 # ─── MESSAGE BUILDERS ─────────────────────────────────────
 
-def build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd, last_gold, last_silver, message_type="regular"):
+def build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd, last_gold, last_silver, rate_source, message_type="regular"):
     now = datetime.now(LONDON_TZ)
-    date_str = now.strftime("%d / %m / %Y")
+    date_str = now.strftime("%d/%m/%Y")
     time_str = now.strftime("%H:%M")
     silver_kg_usd = calculate_silver_usd(silver_oz)
 
     gold_trend = trend_emoji(gold_oz, last_gold)
     silver_trend = trend_emoji(silver_oz, last_silver)
 
+    title = "📊 نرخی زێڕ و زیو"
     if message_type == "open":
-        header = f"🔔 بازاڕ کرایەوە — Market Open!\n"
+        title = "🔔 بازاڕ کرایەوە"
     elif message_type == "close":
-        header = f"🌙 بازاڕ داخرا — Market Closing Soon\n"
-    else:
-        header = ""
+        title = "🌙 بازاڕ داخرا"
 
     msg = (
-        f"{header}"
-        f"🗓 {date_str}   🕐 {time_str} (London)\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏅 نرخی زێڕ\n"
-        f"   ئۆنسێک ➜ ${gold_oz:,.2f}  {gold_trend}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💛 عەیار ٢٤  ►  {format_iqd(gold_iqd[24])} دینار\n"
-        f"🟡 عەیار ٢٢  ►  {format_iqd(gold_iqd[22])} دینار\n"
-        f"🟠 عەیار ٢١  ►  {format_iqd(gold_iqd[21])} دینار\n"
-        f"🔶 عەیار ١٨  ►  {format_iqd(gold_iqd[18])} دینار\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🥈 نرخی زیو\n"
-        f"   ئۆنسێک ➜ ${silver_oz:,.2f}  {silver_trend}\n"
-        f"   یەک کیلۆ ➜ ${silver_kg_usd:,.2f}\n"
-        f"⚠️ نرخی بازاڕی جیهانییە، نەک نرخی دوکانەکانی کوردستان\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 نرخی دۆلار  ►  {usd_iqd*100:,.0f} دینار (بۆ 100$)"
+        f"{title}\n"
+        f"🗓 {date_str}  •  🕐 {time_str} London\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 زێڕ | Gold\n"
+        f"ئۆنس:  ${gold_oz:,.2f}  {gold_trend}\n\n"
+        f"💛 24K  {format_iqd(gold_iqd[24])} دینار\n"
+        f"🟡 22K  {format_iqd(gold_iqd[22])} دینار\n"
+        f"🟠 21K  {format_iqd(gold_iqd[21])} دینار\n"
+        f"🔶 18K  {format_iqd(gold_iqd[18])} دینار\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🥈 زیو | Silver\n"
+        f"ئۆنس:  ${silver_oz:,.2f}  {silver_trend}\n"
+        f"کیلۆ:  ${silver_kg_usd:,.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 دۆلار: {usd_iqd*100:,.0f} دینار بۆ 100$\n"
+        f"🔄 سەرچاوە: {rate_source}\n\n"
+        f"⚠️ نرخەکان جیهانین و لە نرخی دوکانەکان جیاوازن."
     )
     return msg
 
@@ -319,7 +386,7 @@ def build_weekend_message():
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"📅 {now.strftime('%d/%m/%Y')}\n"
         f"بازاڕی زێڕ و زیو بۆ کۆتایی هەفتە داخراوە.\n"
-        f"دووشەممە دەکرێتەوە. ✅\n"
+        f"یەکشەممە شەو کاتژمێر 10:00 بە کاتی لەندەن دەکرێتەوە. ✅\n"
         f"Gold & Silver market is closed for the weekend.\n"
         f"Reopens Sunday 10:00 PM London time."
     )
@@ -375,21 +442,21 @@ async def send_price_update(bot, message_type="regular"):
 
     try:
         gold_oz, silver_oz = await get_metals_prices()
-        usd_iqd = load_rate()
+        usd_iqd, rate_source = await get_usd_iqd_rate()
         last = load_last_prices()
 
         # Check price alerts
         if last["gold"] > 0:
-            if abs(gold_oz - last["gold"]) >= 50:
+            if abs(gold_oz - last["gold"]) >= GOLD_ALERT_USD:
                 alert = build_alert_message("gold", last["gold"], gold_oz)
                 await bot.send_message(chat_id=CHANNEL_ID, text=alert)
-            if abs(silver_oz - last["silver"]) >= 2:
+            if abs(silver_oz - last["silver"]) >= SILVER_ALERT_USD:
                 alert = build_alert_message("silver", last["silver"], silver_oz)
                 await bot.send_message(chat_id=CHANNEL_ID, text=alert)
 
         gold_iqd = calculate_gold(gold_oz, usd_iqd)
         message = build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd,
-                                         last["gold"], last["silver"], message_type)
+                                         last["gold"], last["silver"], rate_source, message_type)
 
         # Add news on market open
         if message_type == "open":
@@ -487,8 +554,9 @@ async def cmd_setrate(update, context):
     try:
         rate = float(context.args[0].replace(",", ""))
         save_rate(rate)
+        save_rate_meta("manual")
         await update.message.reply_text(f"✅ نرخی دۆلار نوێ کرا!\n💵 100$ = {rate*100:,.0f} دینار")
-    except:
+    except Exception:
         await update.message.reply_text("❌ ژمارەی دروست بنووسە.")
 
 async def cmd_setinterval(update, context, scheduler, bot):
@@ -498,8 +566,13 @@ async def cmd_setinterval(update, context, scheduler, bot):
     await update.message.reply_text("ℹ️ بۆتەکە ئێستا هەر 30 خولەک چاودێری دەکات و لە :00 و :30 دەنێردرێت.")
 
 async def cmd_rate(update, context):
-    rate = load_rate()
-    await update.message.reply_text(f"💵 نرخی دۆلار: {rate*100:,.0f} دینار (بۆ 100$)")
+    rate, source = await get_usd_iqd_rate(force_refresh=True)
+    await update.message.reply_text(
+        f"💵 نرخی دۆلار\n"
+        f"1$ = {rate:,.2f} دینار\n"
+        f"100$ = {rate*100:,.0f} دینار\n"
+        f"🔄 سەرچاوە: {source}"
+    )
 
 async def cmd_price(update, context):
     if not is_admin(update):
@@ -525,31 +598,87 @@ async def cmd_summary(update, context):
         return
     await send_weekly_summary(context.bot)
 
+async def cmd_status(update, context):
+    if not is_admin(update):
+        await update.message.reply_text("❌ مۆڵەتت نییە.")
+        return
+    rate = load_rate()
+    rate_meta = load_rate_meta()
+    last = load_last_prices()
+    now = datetime.now(LONDON_TZ)
+    msg = (
+        f"📌 دۆخی بۆت\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"بازاڕ: {market_status_text()}\n"
+        f"کات: {now.strftime('%d/%m/%Y %H:%M')} London\n"
+        f"دۆلار: {rate*100:,.0f} دینار بۆ 100$\n"
+        f"سەرچاوەی دۆلار: {rate_meta.get('source', 'manual/default')}\n"
+        f"دوایین زێڕ: ${last.get('gold', 0):,.2f}\n"
+        f"دوایین زیو: ${last.get('silver', 0):,.2f}\n"
+        f"چاودێری: هەر 30 خولەک لە :00 و :30\n"
+        f"AI News: {'✅' if ANTHROPIC_API_KEY else '❌'}"
+    )
+    await update.message.reply_text(msg)
+
 async def cmd_help(update, context):
     msg = (
         "🤖 فەرمانەکانی بۆت:\n\n"
-        "/setrate 1552.50 — نرخی دۆلار بگۆڕە\n"
-        "/rate — نرخی ئێستای دۆلار\n"
+        "/start — دەستپێکردن\n"
+        "/status — دۆخی بۆت و بازاڕ\n"
+        "/rate — نرخی دۆلار بە شێوەی ئۆتۆماتیک\n"
         "/price — ئێستا نرخەکان بنێرە\n"
         "/news — هەواڵی ئابووری ئەمڕۆ\n"
         "/summary — پوختەی هەفتە\n"
+        "/setrate 1552.50 — نرخی دۆلار بەدەستی بگۆڕە\n"
         "/help — ئەم لیستە"
     )
     await update.message.reply_text(msg)
+
+async def cmd_start(update, context):
+    await cmd_help(update, context)
+
+async def setup_bot_commands(app):
+    commands = [
+        BotCommand("start", "دەستپێکردن"),
+        BotCommand("status", "دۆخی بۆت و بازاڕ"),
+        BotCommand("rate", "نرخی دۆلار"),
+        BotCommand("price", "نرخی زێڕ و زیو بنێرە"),
+        BotCommand("news", "هەواڵی ئابووری ئەمڕۆ"),
+        BotCommand("summary", "پوختەی هەفتە"),
+        BotCommand("setrate", "نرخی دۆلار بەدەستی بگۆڕە"),
+        BotCommand("help", "فەرمانەکان"),
+    ]
+    await app.bot.set_my_commands(commands)
+
+def validate_config():
+    missing = []
+    if not TELEGRAM_TOKEN:
+        missing.append("TELEGRAM_TOKEN")
+    if not CHANNEL_ID:
+        missing.append("CHANNEL_ID")
+    if missing:
+        raise RuntimeError("Missing environment variables: " + ", ".join(missing))
+    if not ADMIN_ID:
+        print("⚠️ ADMIN_ID is not set. Admin commands are open to everyone.")
+    if not ANTHROPIC_API_KEY:
+        print("⚠️ ANTHROPIC_API_KEY is not set. /news will be disabled.")
 
 # ─── MAIN ─────────────────────────────────────────────────
 
 async def main():
     print("🚀 Gold & Silver Bot started!")
+    validate_config()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     scheduler = AsyncIOScheduler(timezone=LONDON_TZ)
 
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("setrate", cmd_setrate))
     app.add_handler(CommandHandler("rate", cmd_rate))
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("setinterval",
         lambda u, c: cmd_setinterval(u, c, scheduler, app.bot)))
@@ -559,6 +688,7 @@ async def main():
     scheduler.start()
 
     await app.initialize()
+    await setup_bot_commands(app)
     await app.start()
     await app.updater.start_polling()
 

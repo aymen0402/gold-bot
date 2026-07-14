@@ -1,2 +1,4 @@
-python-telegram-bot==20.9   # or latest v20 version
-# Remove any old version like 13.x or 14.x
+python-telegram-bot==20.9
+apscheduler==3.10.4
+aiohttp
+pytz

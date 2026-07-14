@@ -1,4 +1,4 @@
-python-telegram-bot==20.9
+python-telegram-bot==20.8
 apscheduler==3.10.4
 aiohttp
 pytz

@@ -1,0 +1,23 @@
+# Render Blueprint — optional one-click style deploy
+services:
+  - type: web
+    name: gold-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        sync: false
+      - key: KURDISTAN_RATE_URL
+        sync: false

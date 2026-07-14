@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Bot runtime state (created while running)
+usd_iqd_rate.txt
+usd_iqd_rate_meta.json
+interval_minutes.txt
+week_data.json
+last_prices.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

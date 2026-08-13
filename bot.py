@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# ─── CONFIG ─────────────────────────────────────────────────
+# ─── CONFIG ───────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 ADMIN_ID = os.environ.get("ADMIN_ID")
@@ -24,7 +24,7 @@ UTC_TZ = pytz.utc  # the real global gold/forex market runs on a fixed UTC sched
 MARKET_OPEN_HOUR_UTC = 22   # Sunday 22:00 UTC
 MARKET_CLOSE_HOUR_UTC = 22  # Friday 22:00 UTC
 
-# ─── FILE STORAGE ─────────────────────────────────────────────
+# ─── FILE STORAGE ─────────────────────────────────────────
 RATE_FILE = "usd_iqd_rate.txt"
 INTERVAL_FILE = "interval_minutes.txt"
 WEEK_DATA_FILE = "week_data.json"
@@ -142,7 +142,7 @@ def save_last_prices(gold, silver):
     with open(LAST_PRICES_FILE, "w") as f:
         json.dump({"gold": gold, "silver": silver}, f)
 
-# ─── MARKET STATUS ────────────────────────────────────────────
+# ─── MARKET STATUS ────────────────────────────────────────
 
 def is_market_holiday(dt):
     for m, d in MARKET_HOLIDAYS:
@@ -221,7 +221,7 @@ def market_open_countdown_text(now=None):
     remaining = format_duration_kurdish(reopen_at - now)
     return f"بازاڕ لە {remaining} تر دەکرێتەوە."
 
-# ─── PRICE FETCHING ──────────────────────────────────────────
+# ─── PRICE FETCHING ───────────────────────────────────────
 
 async def get_metals_prices():
     url_gold = "https://api.gold-api.com/price/XAU"
@@ -316,10 +316,57 @@ async def get_usd_iqd_rate(force_refresh=False):
         print(f"⚠️ Using saved Kurdistan bazar USD/IQD rate: {e}")
         return load_rate(), "نرخی بازاڕی دەستی"
 
-# ─── FOREXFACTORY ECONOMIC CALENDAR ──────────────────────────
+# ─── FOREXFACTORY ECONOMIC CALENDAR ────────────────────────
 # Free public feed used widely by trading bots — no key, no login.
-# Rate-limited by the host to ~2 requests/5min, so don't poll this often.
+# Rate-limited by the host to ~2 requests/5min, so we cache it and never
+# call the raw fetch directly from a per-minute job.
 FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+EVENTS_CACHE_FILE = "ff_events_cache.json"
+EVENTS_CACHE_MINUTES = 10
+EVENT_ALERTS_FILE = "event_alerts.json"
+
+# Short Kurdish explanations for the indicators that most commonly move
+# gold/silver/USD. Matched by substring against the event title.
+INDICATOR_GLOSSARY = {
+    "core cpi": "نرخی پێوانەی بەکاربەر بێ خۆراک و وزە — پایەیی بۆ بڕیاری فیدرال چونکە خۆراک و وزە گۆڕانیان زۆرە.",
+    "cpi": "نرخی پێوانەی بەکاربەر (هەڵاوسان) — پێوەری سەرەکی گۆڕانی نرخی کاڵا و خزمەتگوزاری بۆ خەڵک.",
+    "core ppi": "نرخی کۆتایی بەرهەمهێنەران بێ خۆراک و وزە — پێشبینکەری هەڵاوسانی داهاتوو پێش گەیشتنی بۆ بەکاربەر.",
+    "ppi": "نرخی کۆتایی کە بەرهەمهێنەران وەریدەگرن — زۆرجار پێش CPI دەردەچێت و ئاراستەی هەڵاوسان پیشان دەدات.",
+    "unemployment claims": "ژمارەی داواکارانی نوێی سوودی بێکاری — ژمارەی زیاتر واتە بازاڕی کار لاوازتر دەبێت.",
+    "non-farm": "ژمارەی کاری نوێی دروستکراو دەرەوەی کشتوکاڵ — گرنگترین ئاماری مانگانەی بازاڕی کار.",
+    "federal funds rate": "ڕێژەی سوودی سەرەکی بانکی فیدرالی ئەمریکا — کاریگەری ڕاستەوخۆی هەیە لەسەر هەموو بازاڕەکان.",
+    "fomc": "بەیاننامە یان ئەنجومەنی بانکی فیدرالی ئەمریکا دەربارەی ڕێژەی سوود و ئاراستەی داهاتوو.",
+    "gdp": "گۆڕانی گشتی داهاتی نیشتیمانی — پێوەری سەرەکی گەشەی ئابووری.",
+    "retail sales": "گۆڕانی فرۆشتنی کڕین بە خەڵک — نیشانەی بەهێزی کڕینی خەڵک.",
+    "crude oil inventories": "گۆڕانی کۆگای نەوتی خاوی ئەمریکا — کەمبوونەوە ئەرێنییە بۆ نرخی نەوت، زیادبوون نەرێنییە.",
+    "ism manufacturing": "پێوەری چالاکی پیشەسازی — سەرووی 50 گەشەیە، خوارووی 50 کەمبوونەوەیە.",
+    "ism services": "پێوەری چالاکی بەشی خزمەتگوزاری — سەرووی 50 گەشەیە، خوارووی 50 کەمبوونەوەیە.",
+    "pmi": "پێوەری چالاکی ئابووری — سەرووی 50 گەشەیە، خوارووی 50 کەمبوونەوەیە.",
+}
+
+def get_indicator_explanation(title):
+    t = (title or "").lower()
+    for key, explanation in INDICATOR_GLOSSARY.items():
+        if key in t:
+            return explanation
+    return None
+
+# Indicators where a HIGHER actual-vs-forecast reading is typically read as
+# USD-positive / gold-negative. A few (like jobless claims) work in reverse.
+INVERSE_FOR_USD = {"unemployment claims", "jobless claims"}
+
+def usd_gold_direction(title, actual, forecast):
+    """Best-effort directional call, or (None, None) if not numeric."""
+    try:
+        a = float(str(actual).replace("%", "").replace("K", "").replace("M", "").replace(",", ""))
+        f = float(str(forecast).replace("%", "").replace("K", "").replace("M", "").replace(",", ""))
+    except (TypeError, ValueError):
+        return None, None
+    if a == f:
+        return "➡️", "➡️"
+    higher_is_usd_positive = not any(k in (title or "").lower() for k in INVERSE_FOR_USD)
+    usd_up = (a > f) == higher_is_usd_positive
+    return ("🔼" if usd_up else "🔽"), ("🔽" if usd_up else "🔼")
 
 async def fetch_forexfactory_events():
     async with aiohttp.ClientSession() as session:
@@ -331,9 +378,26 @@ async def fetch_forexfactory_events():
             resp.raise_for_status()
             return await resp.json(content_type=None)
 
-def filter_relevant_ff_events(events, hours_ahead=24):
-    """USD-only, Medium/High impact events (the ones that actually move
-    gold/silver/dollar) landing between 2h ago and `hours_ahead` from now."""
+async def get_cached_ff_events(force_refresh=False):
+    """Cached wrapper — the source rate-limits to ~2 requests/5min, so any
+    per-minute job MUST go through this instead of calling fetch directly."""
+    if not force_refresh:
+        try:
+            with open(EVENTS_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+            fetched_at = datetime.fromisoformat(cache["fetched_at"])
+            if datetime.now(UTC_TZ) - fetched_at < timedelta(minutes=EVENTS_CACHE_MINUTES):
+                return cache["events"]
+        except Exception:
+            pass
+    events = await fetch_forexfactory_events()
+    with open(EVENTS_CACHE_FILE, "w") as f:
+        json.dump({"fetched_at": datetime.now(UTC_TZ).isoformat(), "events": events}, f)
+    return events
+
+def filter_relevant_ff_events(events, hours_ahead=24, hours_behind=2):
+    """USD-only, Medium/High impact events landing between `hours_behind`
+    ago and `hours_ahead` from now — the ones that actually move gold/silver/USD."""
     now = datetime.now(UTC_TZ)
     cutoff = now + timedelta(hours=hours_ahead)
     result = []
@@ -348,18 +412,20 @@ def filter_relevant_ff_events(events, hours_ahead=24):
                 continue
             event_dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
             event_dt = event_dt.astimezone(UTC_TZ) if event_dt.tzinfo else UTC_TZ.localize(event_dt)
-            if now - timedelta(hours=2) <= event_dt <= cutoff:
+            if now - timedelta(hours=hours_behind) <= event_dt <= cutoff:
                 result.append({**e, "_dt": event_dt})
         except Exception:
             continue
     result.sort(key=lambda x: x["_dt"])
     return result
 
-def build_forexfactory_message(events):
+def build_economic_news_message(events):
+    """User-facing /news + market-open digest. No source branding, with
+    a short Kurdish explanation under each indicator when available."""
     if not events:
         return None
     impact_emoji = {"High": "🔴", "Medium": "🟠"}
-    lines = ["📅 هەواڵی ئابووری — ForexFactory (٢٤ سەعاتی داهاتوو)", "━━━━━━━━━━━━━━━━━━━━━"]
+    lines = ["📊 گرنگترین داتا ئابوورییەکان — ٢٤ سەعاتی داهاتوو", "━━━━━━━━━━━━━━━━━━━━━"]
     for e in events[:8]:
         t = e["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
         emoji = impact_emoji.get(e.get("impact", ""), "⚪")
@@ -367,14 +433,115 @@ def build_forexfactory_message(events):
         forecast = e.get("forecast") or "-"
         previous = e.get("previous") or "-"
         actual = e.get("actual") or ""
-        line = f"{emoji} {t} — {title}"
+        line = f"{emoji} {t} 🇺🇸 — {title}"
         if actual:
             line += f"\n   ئێستا: {actual} | ڕاچاوکراو: {forecast} | پێشوو: {previous}"
         else:
             line += f"\n   ڕاچاوکراو: {forecast} | پێشوو: {previous}"
+        explanation = get_indicator_explanation(title)
+        if explanation:
+            line += f"\n   ℹ️ {explanation}"
         lines.append(line)
     lines.append("━━━━━━━━━━━━━━━━━━━━━\nکات بە کاتی کوردستان")
     return "\n".join(lines)
+
+# ─── EVENT ALERT STATE (pre / final / result per event) ────
+
+def event_key(e):
+    return f"{e.get('title','')}|{e.get('date','')}"
+
+def load_event_alert_state():
+    try:
+        with open(EVENT_ALERTS_FILE, "r") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    cutoff = (datetime.now(UTC_TZ) - timedelta(days=2)).isoformat()
+    return {k: v for k, v in data.items() if v.get("date", "9999") > cutoff}
+
+def save_event_alert_state(state):
+    with open(EVENT_ALERTS_FILE, "w") as f:
+        json.dump(state, f)
+
+def build_pre_event_message(e, minutes_left):
+    title = e.get("title", "")
+    explanation = get_indicator_explanation(title) or ""
+    t = e["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
+    msg = (
+        f"🔥 گرنگترین داتای ئابووری ئەمڕۆ\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🇺🇸 ئەمریکا — {title}\n"
+        f"🕐 کاتژمێر {t} بە کاتی کوردستان ({format_duration_kurdish(timedelta(minutes=minutes_left))} تر)\n\n"
+        f"⚫️ پێشووتر: {e.get('previous') or '-'}\n"
+        f"🟠 پێشبینی: {e.get('forecast') or '-'}\n"
+    )
+    if explanation:
+        msg += f"\nℹ️ {explanation}\n"
+    msg += "\n⚠️ ڕاستەوخۆ دوای بڵاوبوونەوەی داتاکە کاریگەری بەهێز لەسەر دۆلار و زێڕ دەبێت. پەیڕەوی ڕیسک مەنەجمێنت بکەن."
+    return msg
+
+def build_final_event_message(e):
+    return f"⏰ ١ خولەک ماوە!\n🇺🇸 {e.get('title','')} ئێستا بڵاودەکرێتەوە — ئاگادار بن ⚠️"
+
+def build_result_event_message(e):
+    title = e.get("title", "")
+    actual = e.get("actual") or "-"
+    forecast = e.get("forecast") or "-"
+    previous = e.get("previous") or "-"
+    usd_dir, gold_dir = usd_gold_direction(title, e.get("actual"), e.get("forecast"))
+    msg = (
+        f"🔴 ئێستا بڵاوکرایەوە\n"
+        f"🇺🇸 {title}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚫️ پێشوو: {previous}\n"
+        f"🟠 پێشبینی: {forecast}\n"
+        f"⚫️ ڕاستەقینە (ئێستا): {actual}\n"
+    )
+    if usd_dir:
+        msg += f"\n📌 دەرئەنجام: {usd_dir} بۆ دۆلاری ئەمریکی، {gold_dir} بۆ زێڕ (پێداچوونەوەیە، نەک ڕاوێژی وردی بازرگانی)"
+    return msg
+
+async def check_economic_event_alerts(bot):
+    """Runs every minute. Sends: ~1h-before heads-up, 1-min-before final
+    reminder, and a result message once the actual figure appears in the
+    (cached, refreshed every 10 min) feed."""
+    try:
+        events = await get_cached_ff_events()
+    except Exception as e:
+        print(f"⚠️ Event alert fetch failed: {e}")
+        return
+    relevant = filter_relevant_ff_events(events, hours_ahead=6, hours_behind=1)
+    if not relevant:
+        return
+
+    state = load_event_alert_state()
+    now = datetime.now(UTC_TZ)
+    changed = False
+
+    for e in relevant:
+        key = event_key(e)
+        entry = state.get(key, {"date": e.get("date", "")})
+        mins_to_event = (e["_dt"] - now).total_seconds() / 60
+
+        if not entry.get("pre") and 50 <= mins_to_event <= 70:
+            await bot.send_message(chat_id=CHANNEL_ID, text=build_pre_event_message(e, int(mins_to_event)))
+            entry["pre"] = True
+            changed = True
+
+        if not entry.get("final") and 0 <= mins_to_event <= 2:
+            await bot.send_message(chat_id=CHANNEL_ID, text=build_final_event_message(e))
+            entry["final"] = True
+            changed = True
+
+        if not entry.get("result") and mins_to_event <= 0 and e.get("actual"):
+            await bot.send_message(chat_id=CHANNEL_ID, text=build_result_event_message(e))
+            entry["result"] = True
+            changed = True
+
+        state[key] = entry
+
+    if changed:
+        save_event_alert_state(state)
 
 
 async def fetch_market_news_headlines():
@@ -395,15 +562,15 @@ async def fetch_market_news_headlines():
 async def get_economic_news_kurdish():
     """Prefer real ForexFactory economic-calendar events (actual numbers,
     no hallucination risk). Falls back to the AI-summarized Google News
-    headlines only if the ForexFactory feed is unreachable or empty."""
+    headlines only if the feed is unreachable or empty."""
     try:
-        events = await fetch_forexfactory_events()
+        events = await get_cached_ff_events()
         relevant = filter_relevant_ff_events(events)
-        msg = build_forexfactory_message(relevant)
+        msg = build_economic_news_message(relevant)
         if msg:
             return msg
     except Exception as e:
-        print(f"⚠️ ForexFactory fetch failed: {e}")
+        print(f"⚠️ Economic calendar fetch failed: {e}")
 
     if not ANTHROPIC_API_KEY:
         return None
@@ -496,7 +663,7 @@ async def get_holiday_reason_kurdish(dt):
         print(f"❌ Holiday reason error: {e}")
     return "بازاڕی زێڕ و زیو ئەمڕۆ داخراوە بۆ پشووی گشتی."
 
-# ─── CALCULATIONS ──────────────────────────────────────────
+# ─── CALCULATIONS ─────────────────────────────────────────
 
 def calculate_gold(gold_oz_usd, usd_iqd):
     gram = gold_oz_usd / 31.1
@@ -531,7 +698,7 @@ def trend_emoji(current, previous):
         return f"📉 -${abs(diff):.2f}"
     return "➡️ بێ گۆڕان"
 
-# ─── MESSAGE BUILDERS ───────────────────────────────────────
+# ─── MESSAGE BUILDERS ─────────────────────────────────────
 
 def build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd, last_gold, last_silver, rate_source, message_type="regular"):
     now_kurdistan = datetime.now(KURDISTAN_TZ)
@@ -662,7 +829,7 @@ def build_alert_message(metal, old_price, new_price):
         f"⚠️ ئەمە ئاگاداری خێرای بازاڕە؛ بە دینار حیساب نەکراوە."
     )
 
-# ─── WEEK DATA TRACKING ─────────────────────────────────────
+# ─── WEEK DATA TRACKING ───────────────────────────────────
 
 def update_week_data(gold, silver, gold_iqd=None):
     data = load_week_data()
@@ -699,7 +866,7 @@ def update_week_data(gold, silver, gold_iqd=None):
     save_week_data(data)
     return data
 
-# ─── MAIN SEND FUNCTIONS ────────────────────────────────────
+# ─── MAIN SEND FUNCTIONS ──────────────────────────────────
 
 async def send_price_update(bot, message_type="regular"):
     if not is_market_open() and message_type == "regular":
@@ -815,12 +982,12 @@ async def scheduled_check(bot):
         await send_holiday_notice(bot)
         return
 
-# ─── ADMIN CHECK ───────────────────────────────────────────
+# ─── ADMIN CHECK ──────────────────────────────────────────
 
 def is_admin(update):
     return not ADMIN_ID or str(update.effective_user.id) == ADMIN_ID
 
-# ─── COMMANDS ────────────────────────────────────────────
+# ─── COMMANDS ─────────────────────────────────────────────
 
 async def cmd_setrate(update, context):
     if not is_admin(update):
@@ -894,7 +1061,8 @@ async def cmd_news(update, context):
     await update.message.reply_text("⏳ هەواڵ دەگرێت...")
     news = await get_economic_news_kurdish()
     if news:
-        await update.message.reply_text(f"📰 هەواڵی ئابووری:\n\n{news}")
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"📰 هەواڵی ئابووری:\n\n{news}")
+        await update.message.reply_text("✅ نێردرا بۆ کەناڵ.")
     else:
         await update.message.reply_text("❌ هەواڵ نەگرا.")
 
@@ -914,7 +1082,7 @@ async def cmd_status(update, context):
     now = datetime.now(LONDON_TZ)
     msg = (
         f"📌 دۆخی بۆت\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"بازاڕ: {market_status_text()}\n"
         f"کات: {now.strftime('%d/%m/%Y %H:%M')} London\n"
         f"دۆلار: {rate*100:,.0f} دینار بۆ 100$\n"
@@ -971,7 +1139,7 @@ def validate_config():
     if not ANTHROPIC_API_KEY:
         print("⚠️ ANTHROPIC_API_KEY is not set. /news will be disabled.")
 
-# ─── MAIN ─────────────────────────────────────────────────────────
+# ─── MAIN ─────────────────────────────────────────────────
 
 async def main():
     print("🚀 Gold & Silver Bot started!")
@@ -993,6 +1161,7 @@ async def main():
 
     # Special market notices are checked every minute. Price updates use the admin interval.
     scheduler.add_job(scheduled_check, CronTrigger(minute="*"), args=[app.bot])
+    scheduler.add_job(check_economic_event_alerts, CronTrigger(minute="*"), args=[app.bot])
     saved_interval = load_interval()
     if saved_interval not in ALLOWED_INTERVALS:
         saved_interval = DEFAULT_INTERVAL

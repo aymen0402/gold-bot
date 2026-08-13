@@ -20,3 +20,5 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+event_alerts.json
+ff_events_cache.json

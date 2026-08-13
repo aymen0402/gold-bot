@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# ─── CONFIG ───────────────────────────────────────────────
+# ─── CONFIG ─────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 ADMIN_ID = os.environ.get("ADMIN_ID")
@@ -19,11 +19,12 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 KURDISTAN_RATE_URL = os.environ.get("KURDISTAN_RATE_URL")
 
 LONDON_TZ = pytz.timezone("Europe/London")  # used only for display in messages
+KURDISTAN_TZ = pytz.timezone("Asia/Baghdad")  # Erbil/Sulaymaniyah share this zone, no DST
 UTC_TZ = pytz.utc  # the real global gold/forex market runs on a fixed UTC schedule
 MARKET_OPEN_HOUR_UTC = 22   # Sunday 22:00 UTC
 MARKET_CLOSE_HOUR_UTC = 22  # Friday 22:00 UTC
 
-# ─── FILE STORAGE ─────────────────────────────────────────
+# ─── FILE STORAGE ─────────────────────────────────────────────
 RATE_FILE = "usd_iqd_rate.txt"
 INTERVAL_FILE = "interval_minutes.txt"
 WEEK_DATA_FILE = "week_data.json"
@@ -141,7 +142,7 @@ def save_last_prices(gold, silver):
     with open(LAST_PRICES_FILE, "w") as f:
         json.dump({"gold": gold, "silver": silver}, f)
 
-# ─── MARKET STATUS ────────────────────────────────────────
+# ─── MARKET STATUS ────────────────────────────────────────────
 
 def is_market_holiday(dt):
     for m, d in MARKET_HOLIDAYS:
@@ -220,7 +221,7 @@ def market_open_countdown_text(now=None):
     remaining = format_duration_kurdish(reopen_at - now)
     return f"بازاڕ لە {remaining} تر دەکرێتەوە."
 
-# ─── PRICE FETCHING ───────────────────────────────────────
+# ─── PRICE FETCHING ──────────────────────────────────────────
 
 async def get_metals_prices():
     url_gold = "https://api.gold-api.com/price/XAU"
@@ -315,7 +316,66 @@ async def get_usd_iqd_rate(force_refresh=False):
         print(f"⚠️ Using saved Kurdistan bazar USD/IQD rate: {e}")
         return load_rate(), "نرخی بازاڕی دەستی"
 
-# ─── AI NEWS FETCH ────────────────────────────────────────
+# ─── FOREXFACTORY ECONOMIC CALENDAR ──────────────────────────
+# Free public feed used widely by trading bots — no key, no login.
+# Rate-limited by the host to ~2 requests/5min, so don't poll this often.
+FF_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+async def fetch_forexfactory_events():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            FF_CALENDAR_URL,
+            timeout=aiohttp.ClientTimeout(total=15),
+            headers={"User-Agent": "Mozilla/5.0 (compatible; GoldBot/1.0)"},
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.json(content_type=None)
+
+def filter_relevant_ff_events(events, hours_ahead=24):
+    """USD-only, Medium/High impact events (the ones that actually move
+    gold/silver/dollar) landing between 2h ago and `hours_ahead` from now."""
+    now = datetime.now(UTC_TZ)
+    cutoff = now + timedelta(hours=hours_ahead)
+    result = []
+    for e in events or []:
+        try:
+            if e.get("country") != "USD":
+                continue
+            if e.get("impact") not in ("High", "Medium"):
+                continue
+            date_str = e.get("date")
+            if not date_str:
+                continue
+            event_dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            event_dt = event_dt.astimezone(UTC_TZ) if event_dt.tzinfo else UTC_TZ.localize(event_dt)
+            if now - timedelta(hours=2) <= event_dt <= cutoff:
+                result.append({**e, "_dt": event_dt})
+        except Exception:
+            continue
+    result.sort(key=lambda x: x["_dt"])
+    return result
+
+def build_forexfactory_message(events):
+    if not events:
+        return None
+    impact_emoji = {"High": "🔴", "Medium": "🟠"}
+    lines = ["📅 هەواڵی ئابووری — ForexFactory (٢٤ سەعاتی داهاتوو)", "━━━━━━━━━━━━━━━━━━━━━"]
+    for e in events[:8]:
+        t = e["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
+        emoji = impact_emoji.get(e.get("impact", ""), "⚪")
+        title = e.get("title", "")
+        forecast = e.get("forecast") or "-"
+        previous = e.get("previous") or "-"
+        actual = e.get("actual") or ""
+        line = f"{emoji} {t} — {title}"
+        if actual:
+            line += f"\n   ئێستا: {actual} | ڕاچاوکراو: {forecast} | پێشوو: {previous}"
+        else:
+            line += f"\n   ڕاچاوکراو: {forecast} | پێشوو: {previous}"
+        lines.append(line)
+    lines.append("━━━━━━━━━━━━━━━━━━━━━\nکات بە کاتی کوردستان")
+    return "\n".join(lines)
+
 
 async def fetch_market_news_headlines():
     query = "gold silver prices Fed CPI inflation market when:1d"
@@ -333,7 +393,18 @@ async def fetch_market_news_headlines():
     return headlines
 
 async def get_economic_news_kurdish():
-    """Use Claude AI to get latest economic news affecting gold/silver in Kurdish Sorani."""
+    """Prefer real ForexFactory economic-calendar events (actual numbers,
+    no hallucination risk). Falls back to the AI-summarized Google News
+    headlines only if the ForexFactory feed is unreachable or empty."""
+    try:
+        events = await fetch_forexfactory_events()
+        relevant = filter_relevant_ff_events(events)
+        msg = build_forexfactory_message(relevant)
+        if msg:
+            return msg
+    except Exception as e:
+        print(f"⚠️ ForexFactory fetch failed: {e}")
+
     if not ANTHROPIC_API_KEY:
         return None
     try:
@@ -425,7 +496,7 @@ async def get_holiday_reason_kurdish(dt):
         print(f"❌ Holiday reason error: {e}")
     return "بازاڕی زێڕ و زیو ئەمڕۆ داخراوە بۆ پشووی گشتی."
 
-# ─── CALCULATIONS ─────────────────────────────────────────
+# ─── CALCULATIONS ──────────────────────────────────────────
 
 def calculate_gold(gold_oz_usd, usd_iqd):
     gram = gold_oz_usd / 31.1
@@ -460,12 +531,12 @@ def trend_emoji(current, previous):
         return f"📉 -${abs(diff):.2f}"
     return "➡️ بێ گۆڕان"
 
-# ─── MESSAGE BUILDERS ─────────────────────────────────────
+# ─── MESSAGE BUILDERS ───────────────────────────────────────
 
 def build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd, last_gold, last_silver, rate_source, message_type="regular"):
-    now = datetime.now(LONDON_TZ)
-    date_str = now.strftime("%d/%m/%Y")
-    time_str = now.strftime("%H:%M")
+    now_kurdistan = datetime.now(KURDISTAN_TZ)
+    now_london = datetime.now(LONDON_TZ)
+    date_str = now_kurdistan.strftime("%d/%m/%Y")
     silver_kg_usd = calculate_silver_usd(silver_oz)
 
     gold_trend = trend_emoji(gold_oz, last_gold)
@@ -479,22 +550,25 @@ def build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd, last_gold, last
 
     msg = (
         f"{title}"
-        f"🗓 {date_str}   🕐 {time_str} (London)\n"
+        f"🗓 {date_str}\n"
+        f"🕐 کاتی کوردستان {now_kurdistan.strftime('%H:%M')}\n"
+        f"🕐 کاتی لەندەن {now_london.strftime('%H:%M')}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏅 نرخی زێڕ\n"
         f"   ئۆنسێک  ➜  ${gold_oz:,.2f}  {gold_trend}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💛 عەیار ٢٤  ►  {format_iqd(gold_iqd[24])} دینار\n"
-        f"🟡 عەیار ٢٢  ►  {format_iqd(gold_iqd[22])} دینار\n"
         f"🟠 عەیار ٢١  ►  {format_iqd(gold_iqd[21])} دینار\n"
         f"🔶 عەیار ١٨  ►  {format_iqd(gold_iqd[18])} دینار\n"
+        f"\n"
+        f"💛 عەیار ٢٤  ►  {format_iqd(gold_iqd[24])} دینار\n"
+        f"🟡 عەیار ٢٢  ►  {format_iqd(gold_iqd[22])} دینار\n"
+        f"\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🥈 نرخی زیو\n"
         f"   ئۆنسێک  ➜  ${silver_oz:,.2f}  {silver_trend}\n"
         f"   یەک کیلۆ ➜  ${silver_kg_usd:,.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💵 نرخی دۆلار  ►  {usd_iqd*100:,.0f} دینار (بۆ 100$)\n"
-        f"🔄 {rate_source}\n"
+        f"💵 نرخی 100$ دۆلار  ►  {usd_iqd*100:,.0f} دینار\n"
         f"⚠️ نرخی بازاڕی جیهانییە، نەک نرخی دوکانەکانی کوردستان"
     )
     return msg
@@ -588,7 +662,7 @@ def build_alert_message(metal, old_price, new_price):
         f"⚠️ ئەمە ئاگاداری خێرای بازاڕە؛ بە دینار حیساب نەکراوە."
     )
 
-# ─── WEEK DATA TRACKING ───────────────────────────────────
+# ─── WEEK DATA TRACKING ─────────────────────────────────────
 
 def update_week_data(gold, silver, gold_iqd=None):
     data = load_week_data()
@@ -625,7 +699,7 @@ def update_week_data(gold, silver, gold_iqd=None):
     save_week_data(data)
     return data
 
-# ─── MAIN SEND FUNCTIONS ──────────────────────────────────
+# ─── MAIN SEND FUNCTIONS ────────────────────────────────────
 
 async def send_price_update(bot, message_type="regular"):
     if not is_market_open() and message_type == "regular":
@@ -741,12 +815,12 @@ async def scheduled_check(bot):
         await send_holiday_notice(bot)
         return
 
-# ─── ADMIN CHECK ──────────────────────────────────────────
+# ─── ADMIN CHECK ───────────────────────────────────────────
 
 def is_admin(update):
     return not ADMIN_ID or str(update.effective_user.id) == ADMIN_ID
 
-# ─── COMMANDS ─────────────────────────────────────────────
+# ─── COMMANDS ────────────────────────────────────────────
 
 async def cmd_setrate(update, context):
     if not is_admin(update):
@@ -840,7 +914,7 @@ async def cmd_status(update, context):
     now = datetime.now(LONDON_TZ)
     msg = (
         f"📌 دۆخی بۆت\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"بازاڕ: {market_status_text()}\n"
         f"کات: {now.strftime('%d/%m/%Y %H:%M')} London\n"
         f"دۆلار: {rate*100:,.0f} دینار بۆ 100$\n"
@@ -897,7 +971,7 @@ def validate_config():
     if not ANTHROPIC_API_KEY:
         print("⚠️ ANTHROPIC_API_KEY is not set. /news will be disabled.")
 
-# ─── MAIN ─────────────────────────────────────────────────
+# ─── MAIN ─────────────────────────────────────────────────────────
 
 async def main():
     print("🚀 Gold & Silver Bot started!")

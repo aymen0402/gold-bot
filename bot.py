@@ -445,10 +445,35 @@ def build_economic_news_message(events):
     lines.append("━━━━━━━━━━━━━━━━━━━━━\nکات بە کاتی کوردستان")
     return "\n".join(lines)
 
-# ─── EVENT ALERT STATE (pre / final / result per event) ────
+# ─── EVENT ALERT STATE (grouped by release time) ───────────
 
-def event_key(e):
-    return f"{e.get('title','')}|{e.get('date','')}"
+# Kurdish display names for common indicator titles (falls back to the
+# original English title if not found here).
+TITLE_KU = {
+    "core ppi": "پێوەرەکانی نرخی بەرهەمهێنەری بنچینەیی PPI/ مانگانە",
+    "ppi": "پێوەرەکانی نرخی بەرهەمهێنەر PPI/ مانگانە",
+    "core cpi": "نرخی بەکاربەری بنچینەیی CPI/ مانگانە",
+    "cpi": "نرخی بەکاربەر (هەڵاوسان) CPI/ مانگانە",
+    "unemployment claims": "ڕێژەی سکاڵاکان لە بێکاری",
+    "non-farm": "گۆڕانی دەرفەتی کار دەرەوەی کشتوکاڵ",
+    "federal funds rate": "ڕێژەی سوودی بانکی فیدرال",
+    "fomc": "بەیاننامەی بانکی فیدرال",
+    "gdp": "گەشەی ناوخۆیی گشتی GDP",
+    "retail sales": "فرۆشتنی کڕین",
+    "crude oil inventories": "کۆگای نەوتی خاو",
+    "ism manufacturing": "پێوەری پیشەسازی ISM",
+    "ism services": "پێوەری خزمەتگوزاری ISM",
+}
+
+def translate_title(title):
+    t = (title or "").lower()
+    for key, ku in TITLE_KU.items():
+        if key in t:
+            return ku
+    return title
+
+def group_key(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M")
 
 def load_event_alert_state():
     try:
@@ -456,55 +481,71 @@ def load_event_alert_state():
             data = json.load(f)
     except Exception:
         data = {}
-    cutoff = (datetime.now(UTC_TZ) - timedelta(days=2)).isoformat()
-    return {k: v for k, v in data.items() if v.get("date", "9999") > cutoff}
+    cutoff = (datetime.now(UTC_TZ) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M")
+    return {k: v for k, v in data.items() if k == "_meta" or k > cutoff}
 
 def save_event_alert_state(state):
     with open(EVENT_ALERTS_FILE, "w") as f:
         json.dump(state, f)
 
-def build_pre_event_message(e, minutes_left):
-    title = e.get("title", "")
-    explanation = get_indicator_explanation(title) or ""
-    t = e["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
-    msg = (
-        f"🔥 گرنگترین داتای ئابووری ئەمڕۆ\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🇺🇸 ئەمریکا — {title}\n"
-        f"🕐 کاتژمێر {t} بە کاتی کوردستان ({format_duration_kurdish(timedelta(minutes=minutes_left))} تر)\n\n"
-        f"⚫️ پێشووتر: {e.get('previous') or '-'}\n"
-        f"🟠 پێشبینی: {e.get('forecast') or '-'}\n"
-    )
-    if explanation:
-        msg += f"\nℹ️ {explanation}\n"
-    msg += "\n⚠️ ڕاستەوخۆ دوای بڵاوبوونەوەی داتاکە کاریگەری بەهێز لەسەر دۆلار و زێڕ دەبێت. پەیڕەوی ڕیسک مەنەجمێنت بکەن."
-    return msg
+def build_grouped_pre_message(group_events):
+    lines = ["🔥 گرنگترین داتا ئابوورییەکانی ئەمڕۆ و کاتی بڵاوکردنەوەیان.", ""]
+    for i, e in enumerate(group_events):
+        t = e["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
+        usd_up_if_higher, _ = usd_gold_direction(e.get("title", ""), 1, 0)  # probe direction rule only
+        higher_is_positive = not any(k in (e.get("title", "") or "").lower() for k in INVERSE_FOR_USD)
+        lines.append(f"- کاتژمێر {t}")
+        lines.append("ئەمریکا USD 🇺🇸")
+        lines.append(translate_title(e.get("title", "")))
+        lines.append(f"پێشووتر : {e.get('previous') or '-'}")
+        lines.append(f"پێشبینی : {e.get('forecast') or '-'}")
+        lines.append("بڵاوکراوە زیاتر 🔼 بێت لە پێشبینیکراو")
+        if higher_is_positive:
+            lines.append("ئەرێنی 🔼 دەبێت بۆ دۆلاری ئەمریکی")
+        else:
+            lines.append("نەرێنی 🔽 دەبێت بۆ دۆلاری ئەمریکی")
+        if i < len(group_events) - 1:
+            lines.append("———————————————")
+    return "\n".join(lines)
 
-def build_final_event_message(e):
-    return f"⏰ ١ خولەک ماوە!\n🇺🇸 {e.get('title','')} ئێستا بڵاودەکرێتەوە — ئاگادار بن ⚠️"
+def build_grouped_final_message(group_events):
+    t = group_events[0]["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
+    titles = "، ".join(translate_title(e.get("title", "")) for e in group_events)
+    return f"⏰ ١ خولەک ماوە!\n🇺🇸 {titles}\nئێستا بڵاودەکرێتەوە — ئاگادار بن ⚠️"
 
-def build_result_event_message(e):
-    title = e.get("title", "")
-    actual = e.get("actual") or "-"
-    forecast = e.get("forecast") or "-"
-    previous = e.get("previous") or "-"
-    usd_dir, gold_dir = usd_gold_direction(title, e.get("actual"), e.get("forecast"))
-    msg = (
-        f"🔴 ئێستا بڵاوکرایەوە\n"
-        f"🇺🇸 {title}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚫️ پێشوو: {previous}\n"
-        f"🟠 پێشبینی: {forecast}\n"
-        f"⚫️ ڕاستەقینە (ئێستا): {actual}\n"
-    )
-    if usd_dir:
-        msg += f"\n📌 دەرئەنجام: {usd_dir} بۆ دۆلاری ئەمریکی، {gold_dir} بۆ زێڕ (پێداچوونەوەیە، نەک ڕاوێژی وردی بازرگانی)"
-    return msg
+def build_grouped_result_message(group_events):
+    lines = []
+    for i, e in enumerate(group_events):
+        t = e["_dt"].astimezone(KURDISTAN_TZ).strftime("%H:%M")
+        actual = e.get("actual") or "-"
+        forecast = e.get("forecast") or "-"
+        previous = e.get("previous") or "-"
+        usd_dir, _ = usd_gold_direction(e.get("title", ""), e.get("actual"), e.get("forecast"))
+        lines.append(f"کاتژمێر {t}")
+        lines.append("ئەمریکا USD 🇺🇸")
+        lines.append(translate_title(e.get("title", "")))
+        lines.append(f"پێشووتر : {previous}")
+        lines.append(f"پێشبینی : {forecast}")
+        lines.append(f"ئێستا :{actual}")
+        if usd_dir == "🔼":
+            lines.append("ئەنجام : ئەرێنی بۆ دۆلاری ئەمریکی🔼")
+        elif usd_dir == "🔽":
+            lines.append("ئەنجام : نەرێنی بۆ دۆلاری ئەمریکی🔽")
+        else:
+            lines.append("ئەنجام : ➡️ بێ گۆڕانکاری بەرچاو")
+        if i < len(group_events) - 1:
+            lines.append("———————————————")
+    return "\n".join(lines)
+
+FORCE_REFRESH_COOLDOWN_MINUTES = 3
 
 async def check_economic_event_alerts(bot):
-    """Runs every minute. Sends: ~1h-before heads-up, 1-min-before final
-    reminder, and a result message once the actual figure appears in the
-    (cached, refreshed every 10 min) feed."""
+    """Runs every minute. Groups events that release at the same minute into
+    ONE message (instead of spamming one per indicator). Sends: ~1h-before
+    heads-up, 1-min-before final reminder, and — once released — a result
+    message. Because the free feed only refreshes 'actual' occasionally, we
+    force an uncached refresh (rate-limited to once per few minutes) whenever
+    a release has passed and we're still waiting on its result."""
     try:
         events = await get_cached_ff_events()
     except Exception as e:
@@ -515,28 +556,69 @@ async def check_economic_event_alerts(bot):
         return
 
     state = load_event_alert_state()
+    meta = state.get("_meta", {})
     now = datetime.now(UTC_TZ)
-    changed = False
 
+    groups = {}
     for e in relevant:
-        key = event_key(e)
-        entry = state.get(key, {"date": e.get("date", "")})
-        mins_to_event = (e["_dt"] - now).total_seconds() / 60
+        groups.setdefault(group_key(e["_dt"]), []).append(e)
+
+    # If any already-final group is still missing its result, force a fresh
+    # (uncached) fetch — once, respecting the cooldown — then re-group.
+    needs_result = any(
+        state.get(gk, {}).get("final") and not state.get(gk, {}).get("result")
+        and groups[gk][0]["_dt"] <= now
+        for gk in groups
+    )
+    meta_updated = False
+    if needs_result:
+        last_refresh = meta.get("last_force_refresh")
+        cooldown_ok = True
+        if last_refresh:
+            try:
+                cooldown_ok = now - datetime.fromisoformat(last_refresh) >= timedelta(minutes=FORCE_REFRESH_COOLDOWN_MINUTES)
+            except Exception:
+                cooldown_ok = True
+        if cooldown_ok:
+            try:
+                events = await get_cached_ff_events(force_refresh=True)
+                relevant = filter_relevant_ff_events(events, hours_ahead=6, hours_behind=1)
+                groups = {}
+                for e in relevant:
+                    groups.setdefault(group_key(e["_dt"]), []).append(e)
+                meta["last_force_refresh"] = now.isoformat()
+                meta_updated = True
+            except Exception as e:
+                print(f"⚠️ Forced refresh for results failed: {e}")
+
+    changed = False
+    for gk, group_events in groups.items():
+        entry = state.get(gk, {"date": group_events[0].get("date", "")})
+        mins_to_event = (group_events[0]["_dt"] - now).total_seconds() / 60
 
         if not entry.get("pre") and 50 <= mins_to_event <= 70:
-            await bot.send_message(chat_id=CHANNEL_ID, text=build_pre_event_message(e, int(mins_to_event)))
+            await bot.send_message(chat_id=CHANNEL_ID, text=build_grouped_pre_message(group_events))
             entry["pre"] = True
             changed = True
 
         if not entry.get("final") and 0 <= mins_to_event <= 2:
-            await bot.send_message(chat_id=CHANNEL_ID, text=build_final_event_message(e))
+            await bot.send_message(chat_id=CHANNEL_ID, text=build_grouped_final_message(group_events))
             entry["final"] = True
             changed = True
 
-        if not entry.get("result") and mins_to_event <= 0 and e.get("actual"):
-            await bot.send_message(chat_id=CHANNEL_ID, text=build_result_event_message(e))
+        if not entry.get("result") and mins_to_event <= 0 and all(e.get("actual") for e in group_events):
+            await bot.send_message(chat_id=CHANNEL_ID, text=build_grouped_result_message(group_events))
             entry["result"] = True
             changed = True
+
+        state[gk] = entry
+
+    if meta_updated:
+        state["_meta"] = meta
+        changed = True
+
+    if changed:
+        save_event_alert_state(state)
 
         state[key] = entry
 
@@ -1143,6 +1225,24 @@ def validate_config():
 
 async def main():
     print("🚀 Gold & Silver Bot started!")
+
+    # Bind the health-check port FIRST, before anything else — so Render's
+    # port scanner sees it immediately regardless of what happens later
+    # (config validation, Telegram API calls, etc.).
+    port = os.environ.get("PORT") or "10000"
+    try:
+        from aiohttp import web as _web
+        async def _health(request):
+            return _web.Response(text="ok")
+        _health_app = _web.Application()
+        _health_app.router.add_get("/", _health)
+        _runner = _web.AppRunner(_health_app)
+        await _runner.setup()
+        await _web.TCPSite(_runner, "0.0.0.0", int(port)).start()
+        print(f"🌐 Health-check server listening on :{port} (PORT env was {'set' if os.environ.get('PORT') else 'NOT set — used default'})")
+    except Exception as e:
+        print(f"⚠️ Health-check server failed to start: {e}")
+
     validate_config()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()

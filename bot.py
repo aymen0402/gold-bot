@@ -5,6 +5,10 @@ import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import pytz
+import wave
+import struct
+import math
+import io
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -780,7 +784,128 @@ def trend_emoji(current, previous):
         return f"📉 -${abs(diff):.2f}"
     return "➡️ بێ گۆڕان"
 
-# ─── MESSAGE BUILDERS ─────────────────────────────────────
+# ─── RADIO STREAM HELPERS ───────────────────────────────────
+
+def generate_ambient_tone_wav(seconds=8, freq=220.0, sample_rate=22050, volume=0.15):
+    """A soft looping two-tone ambient pad, generated with stdlib only
+    (no audio libraries needed). Used as the background sound on /radio."""
+    n_samples = int(seconds * sample_rate)
+    buf = io.BytesIO()
+    with wave.open(buf, "w") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        frames = bytearray()
+        fade_samples = sample_rate * 0.5
+        for i in range(n_samples):
+            t = i / sample_rate
+            fade = min(1.0, i / fade_samples, (n_samples - i) / fade_samples)
+            sample = (
+                math.sin(2 * math.pi * freq * t) * 0.6 +
+                math.sin(2 * math.pi * (freq * 1.5) * t) * 0.4
+            ) * volume * fade
+            frames += struct.pack("<h", int(sample * 32767))
+        wav.writeframes(bytes(frames))
+    return buf.getvalue()
+
+def build_speak_sentence_en():
+    last = load_last_prices()
+    gold = last.get("gold", 0)
+    if gold <= 0:
+        return "Gold price is not available yet."
+    return f"Gold is trading at {gold:,.2f} dollars per ounce."
+
+def build_speak_sentence_ku():
+    last = load_last_prices()
+    rate = load_rate()
+    gold = last.get("gold", 0)
+    if gold <= 0:
+        return "نرخی زێڕ ئێستا بەردەست نییە."
+    gold_iqd = calculate_gold(gold, rate)
+    return f"نرخی زێڕ ئێستا {gold:,.2f} دۆلارە بۆ ئۆنسێک، یان {format_iqd(gold_iqd[21])} دینار بۆ عەیار بیست و یەک."
+
+RADIO_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gold Price Radio</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background:#0d1117; color:#eee; text-align:center; padding:40px 20px; }
+  h1 { font-size: 1.3em; margin-bottom: 30px; }
+  button { font-size: 1.1em; padding: 14px 28px; margin: 8px; border-radius: 12px; border: none; background:#222; color:#eee; }
+  button.active { background:#f5c542; color:#111; font-weight:bold; }
+  #status { margin-top: 30px; opacity: 0.7; font-size: 0.95em; }
+</style>
+</head>
+<body>
+<h1>🏅 Gold Price Radio</h1>
+<button id="btn1" onclick="setInterval_(1)">1 min</button>
+<button id="btn5" onclick="setInterval_(5)">5 min</button>
+<br><br>
+<button id="playBtn" onclick="startRadio()">▶️ Start</button>
+<div id="status">Choose an interval, then press Start</div>
+<audio id="tone" src="/radio-tone.wav" loop preload="auto"></audio>
+<script>
+let minutes = parseInt(localStorage.getItem('radioMinutes') || '5');
+let timer = null;
+let started = false;
+
+function highlightButtons() {
+  document.getElementById('btn1').className = minutes === 1 ? 'active' : '';
+  document.getElementById('btn5').className = minutes === 5 ? 'active' : '';
+}
+
+function setInterval_(m) {
+  minutes = m;
+  localStorage.setItem('radioMinutes', m);
+  highlightButtons();
+  if (started) scheduleNext();
+}
+
+function speak(text, lang) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang;
+  u.rate = 0.95;
+  window.speechSynthesis.speak(u);
+}
+
+async function speakUpdate() {
+  try {
+    const en = await (await fetch('/speak')).text();
+    const ku = await (await fetch('/speak-ku')).text();
+    speak(en, 'en-US');
+    setTimeout(() => speak(ku, 'ar'), 4500); // 'ar' voice as closest fallback for Kurdish script
+  } catch (e) {
+    document.getElementById('status').innerText = 'Could not fetch price: ' + e;
+  }
+}
+
+function scheduleNext() {
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(() => { speakUpdate(); scheduleNext(); }, minutes * 60 * 1000);
+}
+
+function startRadio() {
+  const tone = document.getElementById('tone');
+  tone.volume = 0.5;
+  tone.play();
+  started = true;
+  document.getElementById('playBtn').innerText = '⏸ Playing...';
+  document.getElementById('status').innerText = 'Playing — updates every ' + minutes + ' min';
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'Gold Price Radio', artist: 'Live updates' });
+  }
+  speakUpdate();
+  scheduleNext();
+}
+
+highlightButtons();
+</script>
+</body>
+</html>
+"""
+
 
 def build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd, last_gold, last_silver, rate_source, message_type="regular"):
     now_kurdistan = datetime.now(KURDISTAN_TZ)
@@ -1234,8 +1359,41 @@ async def main():
         from aiohttp import web as _web
         async def _health(request):
             return _web.Response(text="ok")
+
+        async def _speak(request):
+            """Plain-text sentence for iOS Shortcuts: fetch this URL, feed
+            the raw response straight into a 'Speak Text' action — no JSON
+            parsing needed."""
+            return _web.Response(text=build_speak_sentence_en())
+
+        async def _speak_ku(request):
+            return _web.Response(text=build_speak_sentence_ku(), charset="utf-8")
+
+        async def _radio_page(request):
+            return _web.Response(text=RADIO_HTML, content_type="text/html")
+
+        async def _radio_tone(request):
+            return _web.Response(body=_RADIO_TONE_BYTES, content_type="audio/wav")
+
+        async def _price_json(request):
+            """JSON version, in case you want the raw numbers instead."""
+            last = load_last_prices()
+            rate = load_rate()
+            return _web.json_response({
+                "gold_usd_oz": last.get("gold", 0),
+                "silver_usd_oz": last.get("silver", 0),
+                "usd_iqd": rate,
+            })
+
+        _RADIO_TONE_BYTES = generate_ambient_tone_wav()
+
         _health_app = _web.Application()
         _health_app.router.add_get("/", _health)
+        _health_app.router.add_get("/speak", _speak)
+        _health_app.router.add_get("/speak-ku", _speak_ku)
+        _health_app.router.add_get("/radio", _radio_page)
+        _health_app.router.add_get("/radio-tone.wav", _radio_tone)
+        _health_app.router.add_get("/price", _price_json)
         _runner = _web.AppRunner(_health_app)
         await _runner.setup()
         await _web.TCPSite(_runner, "0.0.0.0", int(port)).start()

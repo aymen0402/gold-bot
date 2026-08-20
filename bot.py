@@ -786,9 +786,11 @@ def trend_emoji(current, previous):
 
 # ─── RADIO STREAM HELPERS ───────────────────────────────────
 
-def generate_ambient_tone_wav(seconds=8, freq=220.0, sample_rate=22050, volume=0.15):
-    """A soft looping two-tone ambient pad, generated with stdlib only
-    (no audio libraries needed). Used as the background sound on /radio."""
+def generate_ambient_tone_wav(seconds=10, freq=196.0, sample_rate=22050, volume=0.06):
+    """A calm, quiet looping pad (root + perfect fifth), generated with
+    stdlib only. Kept deliberately soft/simple — this plays under a voice
+    announcement, so it should recede into the background, not compete
+    with it."""
     n_samples = int(seconds * sample_rate)
     buf = io.BytesIO()
     with wave.open(buf, "w") as wav:
@@ -796,13 +798,13 @@ def generate_ambient_tone_wav(seconds=8, freq=220.0, sample_rate=22050, volume=0
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
         frames = bytearray()
-        fade_samples = sample_rate * 0.5
+        fade_samples = sample_rate * 1.5  # slower, gentler fade in/out at the loop seam
         for i in range(n_samples):
             t = i / sample_rate
             fade = min(1.0, i / fade_samples, (n_samples - i) / fade_samples)
             sample = (
-                math.sin(2 * math.pi * freq * t) * 0.6 +
-                math.sin(2 * math.pi * (freq * 1.5) * t) * 0.4
+                math.sin(2 * math.pi * freq * t) * 0.7 +          # root
+                math.sin(2 * math.pi * (freq * 1.5) * t) * 0.3    # perfect fifth, quieter
             ) * volume * fade
             frames += struct.pack("<h", int(sample * 32767))
         wav.writeframes(bytes(frames))
@@ -828,15 +830,17 @@ async def build_speak_sentence_en():
     gold = await get_gold_price_for_speech()
     if gold <= 0:
         return "Gold price is not available right now. Please try again shortly."
-    return f"Gold is trading at {gold:,.2f} dollars per ounce."
+    return f"Gold is trading at {round(gold):,} dollars per ounce."
 
-async def build_speak_sentence_ku():
+async def build_speak_sentence_fa():
+    """Persian (Farsi) — used as the second language instead of Kurdish,
+    since Kurdish Sorani isn't a supported voice on iOS/most browsers and
+    was coming out garbled through a fallback voice. Persian has solid,
+    native browser TTS support (lang 'fa-IR')."""
     gold = await get_gold_price_for_speech()
     if gold <= 0:
-        return "نرخی زێڕ ئێستا بەردەست نییە، تکایە دووبارە هەوڵ بدەرەوە."
-    rate = load_rate()
-    gold_iqd = calculate_gold(gold, rate)
-    return f"نرخی زێڕ ئێستا {gold:,.2f} دۆلارە بۆ ئۆنسێک، یان {format_iqd(gold_iqd[21])} دینار بۆ عەیار بیست و یەک."
+        return "قیمت طلا در حال حاضر در دسترس نیست."
+    return f"قیمت طلا اکنون {round(gold):,} دلار برای هر اونس است."
 
 RADIO_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -887,9 +891,9 @@ function speak(text, lang) {
 async function speakUpdate() {
   try {
     const en = await (await fetch('/speak')).text();
-    const ku = await (await fetch('/speak-ku')).text();
+    const fa = await (await fetch('/speak-fa')).text();
     speak(en, 'en-US');
-    setTimeout(() => speak(ku, 'ar'), 4500); // 'ar' voice as closest fallback for Kurdish script
+    setTimeout(() => speak(fa, 'fa-IR'), 4500);
   } catch (e) {
     document.getElementById('status').innerText = 'Could not fetch price: ' + e;
   }
@@ -1380,8 +1384,8 @@ async def main():
             parsing needed."""
             return _web.Response(text=await build_speak_sentence_en())
 
-        async def _speak_ku(request):
-            return _web.Response(text=await build_speak_sentence_ku(), charset="utf-8")
+        async def _speak_fa(request):
+            return _web.Response(text=await build_speak_sentence_fa(), charset="utf-8")
 
         async def _radio_page(request):
             return _web.Response(text=RADIO_HTML, content_type="text/html")
@@ -1404,7 +1408,7 @@ async def main():
         _health_app = _web.Application()
         _health_app.router.add_get("/", _health)
         _health_app.router.add_get("/speak", _speak)
-        _health_app.router.add_get("/speak-ku", _speak_ku)
+        _health_app.router.add_get("/speak-fa", _speak_fa)
         _health_app.router.add_get("/radio", _radio_page)
         _health_app.router.add_get("/radio-tone.wav", _radio_tone)
         _health_app.router.add_get("/price", _price_json)

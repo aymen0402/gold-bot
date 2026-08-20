@@ -8,6 +8,7 @@ import pytz
 import wave
 import base64
 from PIL import Image, ImageDraw, ImageFont
+import qrcode
 from pywebpush import webpush, WebPushException
 from py_vapid import Vapid
 from cryptography.hazmat.primitives import serialization
@@ -329,6 +330,64 @@ async def get_usd_iqd_rate(force_refresh=False):
     except Exception as e:
         print(f"⚠️ Using saved Kurdistan bazar USD/IQD rate: {e}")
         return load_rate(), "نرخی بازاڕی دەستی"
+
+# ─── USD/TOMAN RATE (bon-bast.com) ──────────────────────────
+BONBAST_URL = "https://www.bon-bast.com/"
+TOMAN_RATE_FILE = "usd_toman_rate.txt"
+TOMAN_RATE_META_FILE = "usd_toman_rate_meta.json"
+
+async def fetch_usd_toman_rate():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            BONBAST_URL,
+            timeout=aiohttp.ClientTimeout(total=10),
+            headers={"User-Agent": "Mozilla/5.0 (compatible; GoldBot/1.0)"},
+        ) as resp:
+            resp.raise_for_status()
+            html = await resp.text()
+    m = _re.search(r"USD.{0,80}?([\d,]{5,7})", html, _re.DOTALL)
+    if not m:
+        raise RuntimeError("USD/Toman rate not found on bon-bast.com — page format may have changed")
+    rate = float(m.group(1).replace(",", ""))
+    if not (10_000 < rate < 1_000_000):
+        raise RuntimeError(f"USD/Toman rate {rate} out of sane range — likely a parsing error")
+    return rate
+
+def save_toman_rate(rate):
+    with open(TOMAN_RATE_FILE, "w") as f:
+        f.write(str(rate))
+
+def load_toman_rate():
+    try:
+        with open(TOMAN_RATE_FILE, "r") as f:
+            return float(f.read().strip())
+    except Exception:
+        return 0
+
+def save_toman_rate_meta():
+    with open(TOMAN_RATE_META_FILE, "w") as f:
+        json.dump({"updated_at": datetime.now(UTC_TZ).isoformat()}, f)
+
+def toman_rate_is_fresh():
+    try:
+        with open(TOMAN_RATE_META_FILE, "r") as f:
+            meta = json.load(f)
+        updated_at = datetime.fromisoformat(meta.get("updated_at", ""))
+        return datetime.now(UTC_TZ) - updated_at < timedelta(minutes=RATE_CACHE_MINUTES)
+    except Exception:
+        return False
+
+async def get_usd_toman_rate(force_refresh=False):
+    if not force_refresh and toman_rate_is_fresh():
+        return load_toman_rate()
+    try:
+        rate = await fetch_usd_toman_rate()
+        save_toman_rate(rate)
+        save_toman_rate_meta()
+        return rate
+    except Exception as e:
+        print(f"⚠️ Using saved USD/Toman rate: {e}")
+        return load_toman_rate()
 
 # ─── FOREXFACTORY ECONOMIC CALENDAR ────────────────────────
 # Free public feed used widely by trading bots — no key, no login.
@@ -841,6 +900,17 @@ def generate_app_icon(size):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+def generate_qr_code(url):
+    """QR code pointing at the dashboard, for physical sharing (shop
+    counters, flyers, etc.)."""
+    qr = qrcode.QRCode(border=2, box_size=10)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#0d0d0d", back_color="#ffffff")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
 MANIFEST_JSON = """{
   "name": "زێڕ و زیو - Gold & Silver Kurdistan",
   "short_name": "زێڕ و زیو",
@@ -1211,8 +1281,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="card" id="tomanCard" style="display:none">
+    <div class="card-title">🇮🇷 Toman Rate نرخی تمەن</div>
+    <div class="dollar-row">
+      <span class="label">1 دۆلار — USD 1</span>
+      <span class="amount" id="tomanRate">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📅 پوختەی هەفتانە — Weekly Summary</div>
+    <div class="ayar-grid">
+      <div class="ayar-box"><div class="name">کردنەوە — Open</div><div class="amount" id="weekOpen">—</div></div>
+      <div class="ayar-box"><div class="name">داخستن — Close</div><div class="amount" id="weekClose">—</div></div>
+      <div class="ayar-box"><div class="name">بەرزترین — High</div><div class="amount" id="weekHigh">—</div></div>
+      <div class="ayar-box"><div class="name">نزمترین — Low</div><div class="amount" id="weekLow">—</div></div>
+    </div>
+  </div>
+
   <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
   <button class="notif-btn" id="notifBtn" onclick="enablePush()">🔔 چالاککردنی ئاگادارکردنەوە — Enable price alerts</button>
+
+  <div style="text-align:center; margin-top:24px;">
+    <img src="/qr-code.png" alt="QR code" style="width:120px; height:120px; border-radius:12px; background:#fff; padding:8px;">
+    <div class="status-line">سکان بکە بۆ کردنەوەی ئەم پەڕەیە — Scan to open</div>
+  </div>
 
   <footer>
     <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
@@ -1410,6 +1503,18 @@ async function fetchPrices() {
     updateAyarValue('ayar21', d.gold_iqd['21'] || 0);
     updateAyarValue('ayar18', d.gold_iqd['18'] || 0);
     updateDollarValue('dollarRate', d.usd_iqd_per_100, '', ' د.ع', 0);
+
+    if (d.usd_toman && d.usd_toman > 0) {
+      document.getElementById('tomanCard').style.display = 'block';
+      updateDollarValue('tomanRate', d.usd_toman, '', ' تمەن', 0);
+    }
+
+    if (d.week_open_gold) {
+      document.getElementById('weekOpen').innerText = '$' + d.week_open_gold.toFixed(2);
+      document.getElementById('weekClose').innerText = '$' + d.week_close_gold.toFixed(2);
+      document.getElementById('weekHigh').innerText = '$' + d.week_high_gold.toFixed(2);
+      document.getElementById('weekLow').innerText = '$' + d.week_low_gold.toFixed(2);
+    }
 
     document.getElementById('liveLabel').innerText = d.market_open ? 'LIVE' : 'MARKET CLOSED';
     document.getElementById('liveLabel').className = d.market_open ? '' : 'market-closed';
@@ -1720,6 +1825,10 @@ async def send_price_update(bot, message_type="regular"):
     try:
         gold_oz, silver_oz = await get_metals_prices()
         usd_iqd, rate_source = await get_usd_iqd_rate()
+        try:
+            await get_usd_toman_rate()
+        except Exception as e:
+            print(f"⚠️ Toman rate refresh failed: {e}")
         last = load_last_prices()
 
         # Check price alerts
@@ -2077,18 +2186,25 @@ async def main():
             else who wants raw numbers)."""
             gold, silver = await get_metals_for_display()
             rate = load_rate()
+            toman_rate = load_toman_rate()
             gold_iqd = calculate_gold(gold, rate) if gold > 0 else {24: 0, 22: 0, 21: 0, 18: 0}
             meta = load_rate_meta()
+            week = load_week_data()
             data = {
                 "gold_usd_oz": gold,
                 "silver_usd_oz": silver,
                 "silver_usd_kg": calculate_silver_usd(silver) if silver > 0 else 0,
                 "usd_iqd": rate,
                 "usd_iqd_per_100": rate * 100,
+                "usd_toman": toman_rate,
                 "gold_iqd": {str(k): v for k, v in gold_iqd.items()},
                 "gold_iqd_formatted": {str(k): format_iqd(v) for k, v in gold_iqd.items()},
                 "updated_at": meta.get("updated_at", ""),
                 "market_open": is_market_open(),
+                "week_open_gold": week.get("open_gold", 0),
+                "week_high_gold": week.get("high_gold", 0),
+                "week_low_gold": week.get("low_gold", 0),
+                "week_close_gold": week.get("close_gold", 0),
             }
             resp = _web.json_response(data)
             resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -2115,6 +2231,14 @@ async def main():
 
         async def _icon_512(request):
             return await _icon(request, 512)
+
+        _qr_cache = {"bytes": None}
+
+        async def _qr_code(request):
+            if _qr_cache["bytes"] is None:
+                dashboard_url = str(request.url.with_path("/dashboard").with_query(None))
+                _qr_cache["bytes"] = generate_qr_code(dashboard_url)
+            return _web.Response(body=_qr_cache["bytes"], content_type="image/png")
 
         async def _vapid_public_key(request):
             return _web.Response(text=vapid_public_key_b64url(VAPID_KEYS))
@@ -2152,6 +2276,7 @@ async def main():
         _health_app.router.add_get("/sw.js", _service_worker)
         _health_app.router.add_get("/icon-192.png", _icon_192)
         _health_app.router.add_get("/icon-512.png", _icon_512)
+        _health_app.router.add_get("/qr-code.png", _qr_code)
         _health_app.router.add_get("/vapid-public-key", _vapid_public_key)
         _health_app.router.add_post("/subscribe-push", _subscribe_push)
         _health_app.router.add_post("/track", _track_visit)

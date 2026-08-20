@@ -831,6 +831,22 @@ async def fetch_tts_mp3(text, lang):
             resp.raise_for_status()
             return await resp.read()
 
+async def get_metals_for_display():
+    """Uses cached last-known prices if present; otherwise fetches live.
+    Same reasoning as get_gold_price_for_speech() — Render's free disk is
+    ephemeral, so right after a restart/wake the cache can be empty until
+    the next scheduled job runs."""
+    last = load_last_prices()
+    gold = last.get("gold", 0)
+    silver = last.get("silver", 0)
+    if gold > 0 and silver > 0:
+        return gold, silver
+    try:
+        return await get_metals_prices()
+    except Exception as e:
+        print(f"⚠️ Live price fetch for /price failed: {e}")
+        return gold, silver
+
 async def get_gold_price_for_speech():
     """Uses the cached last-known price if fresh; otherwise fetches live.
     This matters because Render's free disk is ephemeral and the cache
@@ -875,54 +891,78 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>زێڕ و زیو | Gold &amp; Silver Kurdistan</title>
 <style>
   * { box-sizing: border-box; }
+  :root {
+    --bg: #0d0d0d; --fg: #eee; --card-bg: #161616; --card-border: #2a2a2a;
+    --muted: #999; --box-bg: #1f1f1f; --gold: #f5c542; --green: #4ade80;
+    --green-bg: #142a17; --red: #f87171; --btn-bg: #1a1a1a; --btn-border: #333;
+  }
+  [data-theme="light"] {
+    --bg: #f5f5f7; --fg: #111; --card-bg: #ffffff; --card-border: #e2e2e2;
+    --muted: #666; --box-bg: #f0f0f0; --gold: #b8860b; --green: #16a34a;
+    --green-bg: #dcfce7; --red: #dc2626; --btn-bg: #ffffff; --btn-border: #ddd;
+  }
   body {
     font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
-    background: #0d0d0d; color: #eee; margin: 0; padding: 20px 16px 60px;
+    background: var(--bg); color: var(--fg); margin: 0; padding: 20px 16px 60px;
+    transition: background 0.2s, color 0.2s;
   }
+  .theme-switcher {
+    display: flex; justify-content: center; gap: 6px; margin-bottom: 16px;
+  }
+  .theme-switcher button {
+    padding: 6px 14px; border-radius: 20px; border: 1px solid var(--btn-border);
+    background: var(--btn-bg); color: var(--fg); font-size: 0.8em; opacity: 0.6;
+  }
+  .theme-switcher button.active { opacity: 1; border-color: var(--gold); }
   .header { text-align: center; margin-bottom: 24px; }
-  .header h1 { font-size: 1.1em; color: #888; margin: 0 0 4px; letter-spacing: 2px; }
+  .header h1 { font-size: 1.1em; color: var(--muted); margin: 0 0 4px; letter-spacing: 2px; }
   .header h2 { font-size: 1.4em; margin: 0; }
   .live-badge {
     display: inline-flex; align-items: center; gap: 6px;
-    background: #142a17; color: #4ade80; padding: 4px 12px; border-radius: 20px;
+    background: var(--green-bg); color: var(--green); padding: 4px 12px; border-radius: 20px;
     font-size: 0.8em; margin-top: 10px;
   }
-  .live-dot { width: 8px; height: 8px; background: #4ade80; border-radius: 50%; animation: pulse 1.5s infinite; }
+  .live-dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-  .refresh-note { text-align: center; color: #666; font-size: 0.8em; margin: 10px 0 24px; }
+  .refresh-note { text-align: center; color: var(--muted); font-size: 0.8em; margin: 10px 0 24px; }
   .card {
-    background: #161616; border: 1px solid #2a2a2a; border-radius: 16px;
+    background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px;
     padding: 18px 20px; margin: 0 auto 16px; max-width: 420px;
   }
   .card-title { font-size: 1.05em; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
   .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
-  .price-oz .label { color: #999; font-size: 0.9em; }
+  .price-oz .label { color: var(--muted); font-size: 0.9em; }
   .price-oz .value { font-size: 1.6em; font-weight: 700; }
   .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .ayar-box { background: #1f1f1f; border-radius: 10px; padding: 10px 12px; }
-  .ayar-box .name { font-size: 0.8em; color: #999; }
-  .ayar-box .amount { font-size: 1.15em; font-weight: 700; color: #f5c542; }
-  .ayar-box .unit { font-size: 0.7em; color: #777; }
+  .ayar-box { background: var(--box-bg); border-radius: 10px; padding: 10px 12px; }
+  .ayar-box .name { font-size: 0.8em; color: var(--muted); }
+  .ayar-box .amount { font-size: 1.15em; font-weight: 700; color: var(--gold); }
+  .ayar-box .unit { font-size: 0.7em; color: var(--muted); }
   .dollar-row { display: flex; justify-content: space-between; align-items: center; }
-  .dollar-row .amount { font-size: 1.5em; font-weight: 700; color: #4ade80; }
-  .status-line { text-align: center; color: #666; font-size: 0.8em; margin-top: 24px; }
+  .dollar-row .amount { font-size: 1.5em; font-weight: 700; color: var(--green); }
+  .status-line { text-align: center; color: var(--muted); font-size: 0.8em; margin-top: 24px; }
   .refresh-btn {
     display: block; margin: 20px auto; padding: 10px 24px; border-radius: 10px;
-    border: 1px solid #333; background: #1a1a1a; color: #eee; font-size: 0.95em;
+    border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--fg); font-size: 0.95em;
   }
   footer { text-align: center; margin-top: 30px; }
-  footer a { color: #f5c542; text-decoration: none; }
-  .home-note { text-align: center; color: #666; font-size: 0.78em; margin-top: 20px; line-height: 1.5; }
-  .market-closed { color: #f87171; }
+  footer a { color: var(--gold); text-decoration: none; }
+  .home-note { text-align: center; color: var(--muted); font-size: 0.78em; margin-top: 20px; line-height: 1.5; }
+  .market-closed { color: var(--red); }
 </style>
 </head>
 <body>
+  <div class="theme-switcher">
+    <button id="themeAuto" onclick="setTheme('auto')">🔄 سیستەم</button>
+    <button id="themeLight" onclick="setTheme('light')">☀️ ڕووناک</button>
+    <button id="themeDark" onclick="setTheme('dark')">🌙 تاریک</button>
+  </div>
   <div class="header">
     <h1>GOLD &amp; SILVER</h1>
     <h2>زێڕ و زیو — Kurdistan Live Prices</h2>
     <div class="live-badge"><span class="live-dot"></span><span id="liveLabel">LIVE</span></div>
   </div>
-  <div class="refresh-note">نوێکردنەوەی داهاتوو: <span id="countdown">10</span>s</div>
+  <div class="refresh-note">نوێکردنەوەی داهاتوو: <span id="countdown">1</span>s</div>
 
   <div class="card">
     <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
@@ -960,13 +1000,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <footer>
     <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
   </footer>
-  <div class="home-note">
+  <div class="home-note" id="homeNote">
     📲 <b>Add to Home Screen:</b> tap Share → "Add to Home Screen"<br>
     بیخەرە سەر شاشەی مۆبایل: Share → Add to Home Screen
   </div>
 
 <script>
-const REFRESH_SECONDS = 10;
+// Only show the "add to home screen" tip if we're NOT already running
+// as an installed standalone app (covers both iOS Safari's
+// navigator.standalone and the standard PWA display-mode check).
+const isStandalone = window.navigator.standalone === true ||
+                      window.matchMedia('(display-mode: standalone)').matches;
+if (isStandalone) {
+  document.getElementById('homeNote').style.display = 'none';
+}
+
+// --- Theme: system (auto) by default, with manual override, persisted ---
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (mode === 'auto') {
+    root.removeAttribute('data-theme');
+  } else {
+    root.setAttribute('data-theme', mode);
+  }
+  document.getElementById('themeAuto').className = mode === 'auto' ? 'active' : '';
+  document.getElementById('themeLight').className = mode === 'light' ? 'active' : '';
+  document.getElementById('themeDark').className = mode === 'dark' ? 'active' : '';
+}
+function setTheme(mode) {
+  localStorage.setItem('themeMode', mode);
+  applyTheme(mode);
+}
+applyTheme(localStorage.getItem('themeMode') || 'auto');
+
+// --- Live price refresh, every 1 second ---
+const REFRESH_SECONDS = 1;
 let countdown = REFRESH_SECONDS;
 
 function fmtIQD(n) {
@@ -1638,10 +1706,8 @@ async def main():
         async def _price_json(request):
             """Full price breakdown for the /dashboard page (and anyone
             else who wants raw numbers)."""
-            last = load_last_prices()
+            gold, silver = await get_metals_for_display()
             rate = load_rate()
-            gold = last.get("gold", 0)
-            silver = last.get("silver", 0)
             gold_iqd = calculate_gold(gold, rate) if gold > 0 else {24: 0, 22: 0, 21: 0, 18: 0}
             meta = load_rate_meta()
             data = {

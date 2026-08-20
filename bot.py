@@ -954,6 +954,65 @@ def send_web_push_to_all(vapid, title, body):
     if len(still_valid) != len(subs):
         save_push_subscriptions(still_valid)
 
+# ─── DASHBOARD VISITOR STATS ────────────────────────────────
+
+DASHBOARD_STATS_FILE = "dashboard_stats.json"
+
+def load_dashboard_stats():
+    try:
+        with open(DASHBOARD_STATS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"visitors": {}}
+
+def save_dashboard_stats(data):
+    with open(DASHBOARD_STATS_FILE, "w") as f:
+        json.dump(data, f)
+
+def record_dashboard_visit(client_id, installed):
+    data = load_dashboard_stats()
+    now = datetime.now(UTC_TZ).isoformat()
+    visitor = data["visitors"].get(client_id, {"first_seen": now, "visits": 0, "installed": False})
+    visitor["last_seen"] = now
+    visitor["visits"] = visitor.get("visits", 0) + 1
+    if installed:
+        visitor["installed"] = True
+    data["visitors"][client_id] = visitor
+    save_dashboard_stats(data)
+
+def build_dashboard_stats_summary():
+    data = load_dashboard_stats()
+    visitors = data.get("visitors", {})
+    now = datetime.now(UTC_TZ)
+    total_unique = len(visitors)
+    total_visits = sum(v.get("visits", 0) for v in visitors.values())
+    installed_count = sum(1 for v in visitors.values() if v.get("installed"))
+
+    def active_within(hours):
+        cutoff = now - timedelta(hours=hours)
+        count = 0
+        for v in visitors.values():
+            try:
+                last_seen = datetime.fromisoformat(v["last_seen"])
+                if last_seen >= cutoff:
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    active_24h = active_within(24)
+    active_7d = active_within(24 * 7)
+
+    return (
+        f"📊 ئاماری وێبگە (Dashboard)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 کۆی بەکارهێنەرانی جیاواز: {total_unique}\n"
+        f"👁 کۆی سەردانەکان: {total_visits}\n"
+        f"📲 زیادکراوە بۆ شاشەی سەرەکی: {installed_count}\n"
+        f"🟢 چالاک لە ٢٤ کاتژمێری ڕابردوو: {active_24h}\n"
+        f"🟢 چالاک لە ٧ ڕۆژی ڕابردوو: {active_7d}"
+    )
+
 async def fetch_tts_mp3(text, lang):
     """Real server-generated speech audio (Google Translate's TTS endpoint),
     instead of relying on the browser/phone's own installed voices — which
@@ -1167,6 +1226,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 const isStandalone = window.navigator.standalone === true ||
                       window.matchMedia('(display-mode: standalone)').matches;
 if (isStandalone) document.getElementById('homeNote').style.display = 'none';
+
+// --- Anonymous visit tracking (no personal data, just a random local ID) ---
+(function trackVisit() {
+  let clientId = localStorage.getItem('clientId');
+  if (!clientId) {
+    clientId = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()));
+    localStorage.setItem('clientId', clientId);
+  }
+  fetch('/track', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: clientId, installed: isStandalone }),
+  }).catch(() => {});
+})();
 
 function applyTheme(mode) {
   const root = document.documentElement;
@@ -1851,6 +1924,12 @@ async def cmd_summary(update, context):
         return
     await send_weekly_summary(context.bot)
 
+async def cmd_stats(update, context):
+    if not is_admin(update):
+        await update.message.reply_text("❌ مۆڵەتت نییە.")
+        return
+    await update.message.reply_text(build_dashboard_stats_summary())
+
 async def cmd_status(update, context):
     if not is_admin(update):
         await update.message.reply_text("❌ مۆڵەتت نییە.")
@@ -1895,6 +1974,7 @@ async def setup_bot_commands(app):
     commands = [
         BotCommand("start", "دەستپێکردن"),
         BotCommand("status", "دۆخی بۆت و بازاڕ"),
+        BotCommand("stats", "ئاماری وێبگە"),
         BotCommand("rate", "نرخی دۆلار لە بازاڕی کوردستان"),
         BotCommand("price", "نرخی زێڕ و زیو بنێرە"),
         BotCommand("news", "هەواڵی ئابووری ئەمڕۆ"),
@@ -2047,6 +2127,17 @@ async def main():
             except Exception as e:
                 return _web.json_response({"ok": False, "error": str(e)}, status=400)
 
+        async def _track_visit(request):
+            try:
+                body = await request.json()
+                client_id = str(body.get("id", ""))[:100]
+                installed = bool(body.get("installed", False))
+                if client_id:
+                    record_dashboard_visit(client_id, installed)
+                return _web.json_response({"ok": True})
+            except Exception as e:
+                return _web.json_response({"ok": False, "error": str(e)}, status=400)
+
         _health_app = _web.Application()
         _health_app.router.add_get("/", _health)
         _health_app.router.add_get("/speak", _speak)
@@ -2063,6 +2154,7 @@ async def main():
         _health_app.router.add_get("/icon-512.png", _icon_512)
         _health_app.router.add_get("/vapid-public-key", _vapid_public_key)
         _health_app.router.add_post("/subscribe-push", _subscribe_push)
+        _health_app.router.add_post("/track", _track_visit)
         _runner = _web.AppRunner(_health_app)
         await _runner.setup()
         await _web.TCPSite(_runner, "0.0.0.0", int(port)).start()
@@ -2082,6 +2174,7 @@ async def main():
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("setinterval",
         lambda u, c: cmd_setinterval(u, c, scheduler, app.bot)))

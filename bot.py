@@ -1024,6 +1024,49 @@ def send_web_push_to_all(vapid, title, body):
     if len(still_valid) != len(subs):
         save_push_subscriptions(still_valid)
 
+# ─── PRICE HISTORY (for the dashboard chart) ────────────────
+# Sampled once per real price update (the 30-min scheduled job), NOT once
+# per dashboard poll — otherwise this file would grow by one entry per
+# second per visitor. This gives one real data point per actual price
+# change, which is the right granularity for a "today / this week" chart.
+PRICE_HISTORY_FILE = "price_history.json"
+PRICE_HISTORY_MAX_POINTS = 1000  # ~3 weeks at 30-min intervals
+
+def load_price_history():
+    try:
+        with open(PRICE_HISTORY_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_price_history(points):
+    with open(PRICE_HISTORY_FILE, "w") as f:
+        json.dump(points, f)
+
+def append_price_history(gold, silver):
+    points = load_price_history()
+    points.append({
+        "t": datetime.now(UTC_TZ).isoformat(),
+        "g": gold,
+        "s": silver,
+    })
+    if len(points) > PRICE_HISTORY_MAX_POINTS:
+        points = points[-PRICE_HISTORY_MAX_POINTS:]
+    save_price_history(points)
+
+def get_price_history(hours):
+    points = load_price_history()
+    cutoff = datetime.now(UTC_TZ) - timedelta(hours=hours)
+    result = []
+    for p in points:
+        try:
+            t = datetime.fromisoformat(p["t"])
+            if t >= cutoff:
+                result.append(p)
+        except Exception:
+            continue
+    return result
+
 # ─── DASHBOARD VISITOR STATS ────────────────────────────────
 
 DASHBOARD_STATS_FILE = "dashboard_stats.json"
@@ -1213,7 +1256,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
   .price-oz .label { color: var(--muted); font-size: 0.9em; }
   .price-oz .value { font-size: 1.6em; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .sparkline { width: 100%; height: 44px; display: block; margin-bottom: 14px; }
+  .sparkline { width: 100%; height: 120px; display: block; margin-bottom: 6px; }
+  .chart-range-switch { display: flex; gap: 6px; margin-bottom: 10px; }
+  .chart-range-switch button { flex: 1; padding: 6px; font-size: 0.8em; }
+  .chart-note { text-align: center; color: var(--muted); font-size: 0.75em; margin-bottom: 14px; }
   .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .ayar-box { background: var(--box-bg); border-radius: 10px; padding: 10px 12px; }
   .ayar-box .name { font-size: 0.8em; color: var(--muted); }
@@ -1274,7 +1320,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <span class="label">1 oz (ئۆنسێک)</span>
       <span class="value" id="goldOz">Loading...</span>
     </div>
+    <div class="chart-range-switch">
+      <button id="rangeToday" class="calc-mode active" onclick="setChartRange('24h')">ئەمڕۆ — Today</button>
+      <button id="range7d" class="calc-mode" onclick="setChartRange('7d')">هەفتە — Week</button>
+      <button id="range30d" class="calc-mode" onclick="setChartRange('30d')">مانگ — Month</button>
+    </div>
     <canvas class="sparkline" id="sparkline"></canvas>
+    <div class="chart-note" id="chartNote"></div>
     <div class="ayar-grid">
       <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
       <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
@@ -1489,38 +1541,75 @@ function pulseCard(cardId, up) {
   card.classList.add(up ? 'pulse-up' : 'pulse-down');
 }
 
-// --- Mini sparkline chart of recent gold prices ---
-const sparkHistory = [];
-const MAX_SPARK_POINTS = 40;
+// --- Price history chart (real historical data + live continuation) ---
+let chartRange = '24h';
+let chartPoints = []; // [{t: isoString, g: number}, ...]
+
+async function setChartRange(range) {
+  chartRange = range;
+  document.getElementById('rangeToday').className = 'calc-mode' + (range === '24h' ? ' active' : '');
+  document.getElementById('range7d').className = 'calc-mode' + (range === '7d' ? ' active' : '');
+  document.getElementById('range30d').className = 'calc-mode' + (range === '30d' ? ' active' : '');
+  await loadChartHistory();
+}
+
+async function loadChartHistory() {
+  try {
+    const res = await fetch('/history?range=' + chartRange + '&t=' + Date.now());
+    const data = await res.json();
+    chartPoints = data.points || [];
+    drawSparkline();
+    const note = document.getElementById('chartNote');
+    if (chartPoints.length < 2) {
+      note.innerText = 'هێشتا داتای پێویست کۆنەبووەتەوە — Not enough history yet, check back soon';
+    } else {
+      note.innerText = chartPoints.length + ' خاڵ — data points';
+    }
+  } catch (e) {
+    document.getElementById('chartNote').innerText = 'هەڵە لە بارکردنی مێژوو: ' + e;
+  }
+}
+
 function pushSparkPoint(value) {
-  if (sparkHistory.length === 0 || sparkHistory[sparkHistory.length - 1] !== value) {
-    sparkHistory.push(value);
-    if (sparkHistory.length > MAX_SPARK_POINTS) sparkHistory.shift();
+  const last = chartPoints[chartPoints.length - 1];
+  if (!last || last.g !== value) {
+    chartPoints.push({ t: new Date().toISOString(), g: value });
+    // Keep the live-appended tail from growing forever within one session
+    if (chartPoints.length > 500) chartPoints.shift();
   }
   drawSparkline();
 }
+
 function drawSparkline() {
   const canvas = document.getElementById('sparkline');
-  if (!canvas || sparkHistory.length < 2) return;
+  const values = chartPoints.map(p => p.g);
+  if (!canvas || values.length < 2) return;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   canvas.width = w * dpr; canvas.height = h * dpr;
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
-  const min = Math.min(...sparkHistory), max = Math.max(...sparkHistory);
+  const min = Math.min(...values), max = Math.max(...values);
   const range = (max - min) || 1;
-  const up = sparkHistory[sparkHistory.length - 1] >= sparkHistory[0];
+  const up = values[values.length - 1] >= values[0];
   const style = getComputedStyle(document.documentElement);
-  ctx.strokeStyle = up ? style.getPropertyValue('--green').trim() : style.getPropertyValue('--red').trim();
+  const lineColor = up ? style.getPropertyValue('--green').trim() : style.getPropertyValue('--red').trim();
+  ctx.strokeStyle = lineColor;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  sparkHistory.forEach((v, i) => {
-    const x = (i / (sparkHistory.length - 1)) * w;
-    const y = h - ((v - min) / range) * (h - 6) - 3;
+  values.forEach((v, i) => {
+    const x = (i / (values.length - 1)) * w;
+    const y = h - ((v - min) / range) * (h - 10) - 5;
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
   ctx.stroke();
+  // Light fill under the line for a more "chart-like" look
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = lineColor + '22';
+  ctx.fill();
 }
 
 async function fetchPrices() {
@@ -1671,6 +1760,7 @@ function runWeightCalculator() {
 }
 
 window.addEventListener('resize', drawSparkline);
+loadChartHistory();
 setInterval(fetchPrices, 1000);
 fetchPrices();
 </script>
@@ -2007,6 +2097,7 @@ async def send_price_update(bot, message_type="regular"):
         await bot.send_message(chat_id=CHANNEL_ID, text=message)
 
         update_week_data(gold_oz, silver_oz, gold_iqd)
+        append_price_history(gold_oz, silver_oz)
         save_last_prices(gold_oz, silver_oz)
         print(f"✅ [{message_type}] Sent at {datetime.now(LONDON_TZ).strftime('%H:%M')}")
 
@@ -2348,6 +2439,10 @@ async def main():
             # otherwise the summary card sits blank for up to 30 minutes.
             if week.get("open_gold", 0) <= 0 and gold > 0:
                 week = update_week_data(gold, silver, gold_iqd)
+            # Seed price history too, so the chart has at least one point
+            # right away instead of being empty until the next 30-min job.
+            if not load_price_history() and gold > 0:
+                append_price_history(gold, silver)
             data = {
                 "gold_usd_oz": gold,
                 "silver_usd_oz": silver,
@@ -2365,6 +2460,15 @@ async def main():
                 "week_close_gold": week.get("close_gold", 0),
             }
             resp = _web.json_response(data)
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp
+
+        async def _history_json(request):
+            range_param = request.query.get("range", "24h")
+            hours_map = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+            hours = hours_map.get(range_param, 24)
+            points = get_price_history(hours)
+            resp = _web.json_response({"points": points})
             resp.headers["Access-Control-Allow-Origin"] = "*"
             return resp
 
@@ -2429,6 +2533,7 @@ async def main():
         _health_app.router.add_get("/background-music.mp3", _background_music)
         _health_app.router.add_get("/radio", _radio_page)
         _health_app.router.add_get("/price", _price_json)
+        _health_app.router.add_get("/history", _history_json)
         _health_app.router.add_get("/dashboard", _dashboard_page)
         _health_app.router.add_get("/manifest.json", _manifest_json)
         _health_app.router.add_get("/sw.js", _service_worker)

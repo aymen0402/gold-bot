@@ -24,7 +24,7 @@ KURDISTAN_RATE_URL = os.environ.get("KURDISTAN_RATE_URL")
 # Uploaded directly to the GitHub repo (binary upload, not the code editor —
 # the file is too large to paste as text). Update the filename here if you
 # name it something else when uploading.
-BACKGROUND_MUSIC_URL = "https://raw.githubusercontent.com/aymen0402/gold-bot/main/background-music.mp3"
+BACKGROUND_MUSIC_URL = "https://raw.githubusercontent.com/aymen0402/gold-bot/main/1%20Minute%20Relaxing%20Music%20-%20Peaceful%20Ambient%20-%20Stress%20Relief%20-%20Nature%20Background%20-%20Meditation.mp3"
 
 LONDON_TZ = pytz.timezone("Europe/London")  # used only for display in messages
 KURDISTAN_TZ = pytz.timezone("Asia/Baghdad")  # Erbil/Sulaymaniyah share this zone, no DST
@@ -851,7 +851,7 @@ async def build_speak_sentence_en():
     gold = await get_gold_price_for_speech()
     if gold <= 0:
         return "Gold price is not available right now. Please try again shortly."
-    return f"Gold is trading at {round(gold):,} dollars per ounce."
+    return f"Gold is trading at {round(gold):,} dollars."
 
 async def build_speak_sentence_fa():
     """Persian (Farsi) — used as the second language instead of Kurdish,
@@ -861,7 +861,7 @@ async def build_speak_sentence_fa():
     gold = await get_gold_price_for_speech()
     if gold <= 0:
         return "قیمت طلا در حال حاضر در دسترس نیست."
-    return f"قیمت طلا اکنون {round(gold):,} دلار برای هر اونس است."
+    return f"قیمت طلا اکنون {round(gold):,} دلار است."
 
 RADIO_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1434,11 +1434,29 @@ async def main():
                 print(f"⚠️ TTS (fa) failed: {e}")
                 return _web.Response(status=502, text="TTS failed")
 
+        _music_cache = {"bytes": None}
+
         async def _background_music(request):
-            """Redirects to the music file you upload directly to the
-            GitHub repo (binary upload via GitHub's web UI, not the code
-            editor — the file is too large to paste as text)."""
-            raise _web.HTTPFound(BACKGROUND_MUSIC_URL)
+            """Fetches the music file you uploaded to GitHub and serves it
+            ourselves (cached after the first request) with a proper
+            audio/mpeg content-type — GitHub's raw file server doesn't
+            reliably send that header, which is likely why direct redirect
+            playback was failing, especially on iPhone Safari."""
+            if _music_cache["bytes"] is None:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            BACKGROUND_MUSIC_URL,
+                            headers={"User-Agent": "Mozilla/5.0 (compatible; GoldBot/1.0)"},
+                            timeout=aiohttp.ClientTimeout(total=20),
+                        ) as resp:
+                            resp.raise_for_status()
+                            _music_cache["bytes"] = await resp.read()
+                            print(f"🎵 Background music cached: {len(_music_cache['bytes'])} bytes")
+                except Exception as e:
+                    print(f"⚠️ Could not fetch background music: {e}")
+                    return _web.Response(status=502, text=f"Could not fetch music: {e}")
+            return _web.Response(body=_music_cache["bytes"], content_type="audio/mpeg")
 
         async def _radio_page(request):
             return _web.Response(text=RADIO_HTML, content_type="text/html")

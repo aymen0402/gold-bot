@@ -4,3 +4,4 @@ aiohttp
 pytz
 Pillow
 pywebpush
+qrcode

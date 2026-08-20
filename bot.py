@@ -1320,11 +1320,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="card">
     <div class="card-title">🧮 حیسابکەر — Calculator</div>
     <div class="calc-mode-switch">
-      <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
-      <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
+      <button id="calcTabMoney" class="calc-mode active" onclick="setCalcTab('money')">💰 پارە — Money</button>
+      <button id="calcTabWeight" class="calc-mode" onclick="setCalcTab('weight')">⚖️ کێش — Weight</button>
     </div>
-    <input type="number" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
-    <div id="calcResults" class="calc-results"></div>
+
+    <div id="calcMoneyPanel">
+      <div class="calc-mode-switch">
+        <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
+        <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
+      </div>
+      <input type="number" inputmode="decimal" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
+      <div id="calcResults" class="calc-results"></div>
+    </div>
+
+    <div id="calcWeightPanel" style="display:none">
+      <div class="calc-mode-switch">
+        <button id="calcUnitMithqal" class="calc-mode active" onclick="setCalcUnit('mithqal')">مثقال</button>
+        <button id="calcUnitGram" class="calc-mode" onclick="setCalcUnit('gram')">گرام — Gram</button>
+      </div>
+      <input type="number" inputmode="decimal" id="calcWeightInput" class="calc-input" placeholder="بۆ نموونە: 10" oninput="runWeightCalculator()">
+      <div id="calcWeightResults" class="calc-results"></div>
+    </div>
   </div>
 
   <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
@@ -1558,6 +1574,17 @@ async function fetchPrices() {
 // --- Calculator ---
 let latestPrices = null;
 let calcMode = 'usd'; // 'usd' or 'iqd'
+let calcTab = 'money'; // 'money' or 'weight'
+let calcUnit = 'mithqal'; // 'mithqal' or 'gram'
+const MITHQAL_TO_GRAM = 5;
+
+function setCalcTab(tab) {
+  calcTab = tab;
+  document.getElementById('calcTabMoney').className = 'calc-mode' + (tab === 'money' ? ' active' : '');
+  document.getElementById('calcTabWeight').className = 'calc-mode' + (tab === 'weight' ? ' active' : '');
+  document.getElementById('calcMoneyPanel').style.display = tab === 'money' ? 'block' : 'none';
+  document.getElementById('calcWeightPanel').style.display = tab === 'weight' ? 'block' : 'none';
+}
 
 function setCalcMode(mode) {
   calcMode = mode;
@@ -1565,6 +1592,14 @@ function setCalcMode(mode) {
   document.getElementById('calcModeIqd').className = 'calc-mode' + (mode === 'iqd' ? ' active' : '');
   document.getElementById('calcInput').placeholder = mode === 'usd' ? 'بۆ نموونە: 10000' : 'بۆ نموونە: 15000000';
   runCalculator();
+}
+
+function setCalcUnit(unit) {
+  calcUnit = unit;
+  document.getElementById('calcUnitMithqal').className = 'calc-mode' + (unit === 'mithqal' ? ' active' : '');
+  document.getElementById('calcUnitGram').className = 'calc-mode' + (unit === 'gram' ? ' active' : '');
+  document.getElementById('calcWeightInput').placeholder = unit === 'mithqal' ? 'بۆ نموونە: 10' : 'بۆ نموونە: 25';
+  runWeightCalculator();
 }
 
 function runCalculator() {
@@ -1587,7 +1622,8 @@ function runCalculator() {
     const pricePerMithqal = d.gold_iqd[k];
     if (pricePerMithqal > 0) {
       const mithqal = iqdAmount / pricePerMithqal;
-      html += `<div class="calc-row"><span class="calc-label">🏅 ${ayarLabels[k]} — مثقال</span><span class="calc-value">${mithqal.toFixed(2)}</span></div>`;
+      const grams = mithqal * MITHQAL_TO_GRAM;
+      html += `<div class="calc-row"><span class="calc-label">🏅 ${ayarLabels[k]}</span><span class="calc-value">${mithqal.toFixed(2)} مثقال (${grams.toFixed(2)} گرام)</span></div>`;
     }
   }
 
@@ -1598,6 +1634,37 @@ function runCalculator() {
   if (d.silver_usd_kg > 0) {
     const silverKg = usdAmount / d.silver_usd_kg;
     html += `<div class="calc-row"><span class="calc-label">🥈 زیو — کیلۆ (Silver kg)</span><span class="calc-value">${silverKg.toFixed(3)}</span></div>`;
+  }
+
+  resultsEl.innerHTML = html;
+}
+
+// Weight -> price. Type a weight (mithqal or gram) and see what it costs
+// at EVERY ayar (purity), since the same weight is worth different
+// amounts depending on gold purity.
+function runWeightCalculator() {
+  const resultsEl = document.getElementById('calcWeightResults');
+  const raw = document.getElementById('calcWeightInput').value;
+  const weightInput = parseFloat(raw);
+  if (!latestPrices || !weightInput || weightInput <= 0) {
+    resultsEl.innerHTML = '';
+    return;
+  }
+  const d = latestPrices;
+  const mithqal = calcUnit === 'mithqal' ? weightInput : weightInput / MITHQAL_TO_GRAM;
+  const grams = mithqal * MITHQAL_TO_GRAM;
+
+  let html = '';
+  html += `<div class="calc-row"><span class="calc-label">⚖️ کێش — Weight</span><span class="calc-value">${mithqal.toFixed(2)} مثقال (${grams.toFixed(2)} گرام)</span></div>`;
+
+  const ayarLabels = { '24': 'عەیار ٢٤', '22': 'عەیار ٢٢', '21': 'عەیار ٢١', '18': 'عەیار ١٨' };
+  for (const k of ['24', '22', '21', '18']) {
+    const pricePerMithqal = d.gold_iqd[k];
+    if (pricePerMithqal > 0) {
+      const iqdPrice = mithqal * pricePerMithqal;
+      const usdPrice = iqdPrice / d.usd_iqd;
+      html += `<div class="calc-row"><span class="calc-label">🏅 ${ayarLabels[k]}</span><span class="calc-value">${fmtIQD(iqdPrice)} د.ع ($${usdPrice.toFixed(2)})</span></div>`;
+    }
   }
 
   resultsEl.innerHTML = html;

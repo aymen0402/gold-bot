@@ -875,6 +875,9 @@ RADIO_HTML = """<!DOCTYPE html>
   button { font-size: 1.1em; padding: 14px 28px; margin: 8px; border-radius: 12px; border: none; background:#222; color:#eee; }
   button.active { background:#f5c542; color:#111; font-weight:bold; }
   #status { margin-top: 30px; opacity: 0.7; font-size: 0.95em; }
+  #error { margin-top: 10px; color: #ff6b6b; font-size: 0.85em; white-space: pre-wrap; }
+  footer { margin-top: 60px; opacity: 0.6; font-size: 0.85em; }
+  footer a { color: #f5c542; text-decoration: none; }
 </style>
 </head>
 <body>
@@ -884,12 +887,17 @@ RADIO_HTML = """<!DOCTYPE html>
 <br><br>
 <button id="playBtn" onclick="startRadio()">▶️ Start</button>
 <div id="status">Choose an interval, then press Start</div>
+<div id="error"></div>
 <audio id="music" src="/background-music.mp3" loop preload="auto"></audio>
+<audio id="speakEn" preload="auto"></audio>
+<audio id="speakFa" preload="auto"></audio>
 <script>
 let minutes = parseInt(localStorage.getItem('radioMinutes') || '5');
 let timer = null;
 let started = false;
 const music = document.getElementById('music');
+const speakEn = document.getElementById('speakEn');
+const speakFa = document.getElementById('speakFa');
 
 function highlightButtons() {
   document.getElementById('btn1').className = minutes === 1 ? 'active' : '';
@@ -903,23 +911,32 @@ function setInterval_(m) {
   if (started) scheduleNext();
 }
 
-function playAudioAndWait(url) {
+function showError(msg) {
+  document.getElementById('error').innerText = msg;
+}
+
+// Reuses the SAME <audio> element each time (just changes its .src),
+// instead of creating a brand new Audio() object per update. iOS
+// Safari/Chrome are much stricter about playing freshly-created audio
+// objects outside a direct tap — reusing an element that was already
+// unlocked by your Start tap plays far more reliably.
+function playAndWait(el, url) {
   return new Promise((resolve) => {
-    const a = new Audio(url + '?t=' + Date.now());
-    a.onended = resolve;
-    a.onerror = resolve;
-    a.play().catch(resolve);
+    el.src = url + '?t=' + Date.now();
+    el.onended = resolve;
+    el.onerror = () => { showError('Playback error on ' + url); resolve(); };
+    el.play().then(() => showError('')).catch(e => { showError('Blocked: ' + url + ' — ' + e); resolve(); });
   });
 }
 
 async function speakUpdate() {
   document.getElementById('status').innerText = 'Speaking update...';
-  music.volume = 0.15; // duck the music while the voice speaks
+  music.volume = 0.15;
   try {
-    await playAudioAndWait('/speak-en.mp3');
-    await playAudioAndWait('/speak-fa.mp3');
+    await playAndWait(speakEn, '/speak-en.mp3');
+    await playAndWait(speakFa, '/speak-fa.mp3');
   } catch (e) {
-    document.getElementById('status').innerText = 'Could not fetch price: ' + e;
+    showError('Update failed: ' + e);
   }
   music.volume = 0.5;
   document.getElementById('status').innerText = 'Playing — updates every ' + minutes + ' min';
@@ -933,6 +950,14 @@ function scheduleNext() {
 function startRadio() {
   music.volume = 0.5;
   music.play();
+  // "Unlock" both speech players within this same user-tap, using a
+  // silent 1-frame clip, so later programmatic .play() calls on them
+  // are trusted by iOS instead of silently blocked.
+  speakEn.src = '/speak-en.mp3';
+  speakEn.play().then(() => speakEn.pause()).catch(() => {});
+  speakFa.src = '/speak-fa.mp3';
+  speakFa.play().then(() => speakFa.pause()).catch(() => {});
+
   started = true;
   document.getElementById('playBtn').innerText = '⏸ Playing...';
   document.getElementById('status').innerText = 'Playing — updates every ' + minutes + ' min';
@@ -945,6 +970,11 @@ function startRadio() {
 
 highlightButtons();
 </script>
+<footer>
+  🤖 <a href="https://t.me/aymen_0402" target="_blank">Contact on Telegram</a>
+  &nbsp;·&nbsp;
+  📢 <a href="https://t.me/nrxitala" target="_blank">Join the channel</a>
+</footer>
 </body>
 </html>
 """

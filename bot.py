@@ -1074,25 +1074,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .card {
     background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px;
     padding: 18px 20px; margin: 0 auto 16px; max-width: 420px;
+    transition: box-shadow 0.4s, border-color 0.4s;
   }
+  .card.pulse-up { animation: cardPulseUp 0.9s ease; }
+  .card.pulse-down { animation: cardPulseDown 0.9s ease; }
+  @keyframes cardPulseUp { 0% { box-shadow: 0 0 0 2px var(--green); } 100% { box-shadow: 0 0 0 0 transparent; } }
+  @keyframes cardPulseDown { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 0 transparent; } }
   .card-title { font-size: 1.05em; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
-  .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
   .price-oz .label { color: var(--muted); font-size: 0.9em; }
-  .price-oz .value { font-size: 1.6em; font-weight: 700; transition: color 0.4s; }
+  .price-oz .value { font-size: 1.6em; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sparkline { width: 100%; height: 44px; display: block; margin-bottom: 14px; }
   .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .ayar-box { background: var(--box-bg); border-radius: 10px; padding: 10px 12px; }
   .ayar-box .name { font-size: 0.8em; color: var(--muted); }
-  .ayar-box .amount { font-size: 1.15em; font-weight: 700; color: var(--gold); transition: color 0.4s; display: inline-flex; align-items: center; gap: 4px; }
+  .ayar-box .amount {
+    font-size: 1.15em; font-weight: 700; color: var(--gold);
+    display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums;
+  }
   .ayar-box .unit { font-size: 0.7em; color: var(--muted); }
   .trend-arrow { font-size: 0.85em; }
   .trend-up { color: var(--green); }
   .trend-down { color: var(--red); }
-  .flash-up { animation: flashUp 0.6s ease; }
-  .flash-down { animation: flashDown 0.6s ease; }
-  @keyframes flashUp { 0% { color: var(--green); } 100% { color: inherit; } }
-  @keyframes flashDown { 0% { color: var(--red); } 100% { color: inherit; } }
   .dollar-row { display: flex; justify-content: space-between; align-items: center; }
-  .dollar-row .amount { font-size: 1.5em; font-weight: 700; color: var(--green); }
+  .dollar-row .amount { font-size: 1.5em; font-weight: 700; color: var(--green); font-variant-numeric: tabular-nums; }
   .status-line { text-align: center; color: var(--muted); font-size: 0.78em; margin-top: 24px; }
   footer { text-align: center; margin-top: 30px; }
   footer a { color: var(--gold); text-decoration: none; }
@@ -1116,12 +1121,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="live-badge"><span class="live-dot"></span><span id="liveLabel">LIVE</span></div>
   </div>
 
-  <div class="card">
+  <div class="card" id="goldCard">
     <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
     <div class="price-oz">
       <span class="label">1 oz (ئۆنسێک)</span>
       <span class="value" id="goldOz">Loading...</span>
     </div>
+    <canvas class="sparkline" id="sparkline"></canvas>
     <div class="ayar-grid">
       <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
       <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
@@ -1130,7 +1136,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="card">
+  <div class="card" id="silverCard">
     <div class="card-title">🥈 Silver Prices نرخی زیو</div>
     <div class="ayar-grid">
       <div class="ayar-box"><div class="name">Per oz — ئۆنسێک</div><div class="amount" id="silverOz">—</div></div>
@@ -1158,62 +1164,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
 <script>
-// Only show the "add to home screen" tip if we're NOT already running
-// as an installed standalone app.
 const isStandalone = window.navigator.standalone === true ||
                       window.matchMedia('(display-mode: standalone)').matches;
-if (isStandalone) {
-  document.getElementById('homeNote').style.display = 'none';
-}
+if (isStandalone) document.getElementById('homeNote').style.display = 'none';
 
-// --- Theme: system (auto) by default, with manual override, persisted ---
 function applyTheme(mode) {
   const root = document.documentElement;
-  if (mode === 'auto') {
-    root.removeAttribute('data-theme');
-  } else {
-    root.setAttribute('data-theme', mode);
-  }
+  if (mode === 'auto') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', mode);
   document.getElementById('themeAuto').className = mode === 'auto' ? 'active' : '';
   document.getElementById('themeLight').className = mode === 'light' ? 'active' : '';
   document.getElementById('themeDark').className = mode === 'dark' ? 'active' : '';
 }
-function setTheme(mode) {
-  localStorage.setItem('themeMode', mode);
-  applyTheme(mode);
-}
+function setTheme(mode) { localStorage.setItem('themeMode', mode); applyTheme(mode); }
 applyTheme(localStorage.getItem('themeMode') || 'auto');
 
-// --- Push notifications ---
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
   const raw = atob(base64);
   return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
 }
-
 async function enablePush() {
   try {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-      document.getElementById('statusLine').innerText = 'Push not supported on this browser.';
-      return;
+      document.getElementById('statusLine').innerText = 'Push not supported on this browser.'; return;
     }
     const reg = await navigator.serviceWorker.register('/sw.js');
     const perm = await Notification.requestPermission();
-    if (perm !== 'granted') {
-      document.getElementById('statusLine').innerText = 'Notification permission denied.';
-      return;
-    }
+    if (perm !== 'granted') { document.getElementById('statusLine').innerText = 'Notification permission denied.'; return; }
     const vapidKey = await (await fetch('/vapid-public-key')).text();
-    const sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(vapidKey),
-    });
-    await fetch('/subscribe-push', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(sub),
-    });
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(vapidKey) });
+    await fetch('/subscribe-push', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(sub) });
     document.getElementById('notifBtn').innerText = '✅ ئاگادارکردنەوە چالاکە — Alerts enabled';
     document.getElementById('notifBtn').disabled = true;
   } catch (e) {
@@ -1221,52 +1203,141 @@ async function enablePush() {
   }
 }
 
-// --- Live price refresh, every 1 second, with trend arrows + flash ---
-const REFRESH_SECONDS = 1;
-let lastValues = {};
+// --- Smooth number-glide animation (odometer-style) ---
+const animState = {}; // id -> { raw, frame }
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
 
-function fmtIQD(n) {
-  if (!n) return '—';
-  return Math.round(n).toLocaleString();
-}
-
-function setValue(id, newText, rawValue) {
-  const el = document.getElementById(id);
-  const prev = lastValues[id];
-  el.innerText = newText;
-  if (prev !== undefined && rawValue !== undefined && prev !== rawValue) {
-    el.classList.remove('flash-up', 'flash-down');
-    void el.offsetWidth; // restart animation
-    el.classList.add(rawValue > prev ? 'flash-up' : 'flash-down');
+function animateValue(id, fromRaw, toRaw, durationMs, renderFn) {
+  if (animState[id]) cancelAnimationFrame(animState[id].frame);
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const eased = easeOutCubic(t);
+    const current = fromRaw + (toRaw - fromRaw) * eased;
+    renderFn(current);
+    if (t < 1) animState[id].frame = requestAnimationFrame(step);
   }
-  if (rawValue !== undefined) lastValues[id] = rawValue;
+  animState[id] = { frame: requestAnimationFrame(step) };
 }
 
-function setAyarValue(id, formatted, rawValue) {
+function fmtIQD(n) { return Math.round(n).toLocaleString(); }
+function formatIqdKurdish(n) {
+  if (n >= 1000000) {
+    const v = n / 1000000;
+    return (Number.isInteger(v) ? v : v.toFixed(3)) + ' ملیۆن';
+  } else if (n >= 1000) {
+    const v = n / 1000;
+    return Math.round(v) + ' هەزار';
+  }
+  return fmtIQD(n);
+}
+
+const lastRaw = {};
+
+function updateDollarValue(id, newRaw, prefix, suffix, decimals) {
   const el = document.getElementById(id);
-  const prev = lastValues[id];
-  let arrow = '';
-  if (prev !== undefined && rawValue !== undefined && prev !== rawValue) {
-    arrow = rawValue > prev
+  const prevRaw = lastRaw[id];
+  const render = (v) => (decimals ? v.toFixed(decimals) : fmtIQD(v));
+  if (prevRaw === undefined) {
+    el.innerText = prefix + render(newRaw) + suffix;
+    lastRaw[id] = newRaw;
+    return;
+  }
+  if (prevRaw === newRaw) { lastRaw[id] = newRaw; return; }
+  animateValue(id, prevRaw, newRaw, 600, (v) => {
+    el.innerText = prefix + render(v) + suffix;
+  });
+  lastRaw[id] = newRaw;
+}
+
+function updateAyarValue(id, newRaw) {
+  const el = document.getElementById(id);
+  const prevRaw = lastRaw[id];
+  let arrowHtml = '';
+  if (prevRaw !== undefined && prevRaw !== newRaw) {
+    arrowHtml = newRaw > prevRaw
       ? '<span class="trend-arrow trend-up">▲</span>'
       : '<span class="trend-arrow trend-down">▼</span>';
   }
-  el.innerHTML = formatted + arrow;
-  if (rawValue !== undefined) lastValues[id] = rawValue;
+  if (prevRaw === undefined) {
+    el.innerHTML = formatIqdKurdish(newRaw);
+    lastRaw[id] = newRaw;
+    return;
+  }
+  if (prevRaw === newRaw) { lastRaw[id] = newRaw; return; }
+  animateValue(id, prevRaw, newRaw, 600, (v) => {
+    el.innerHTML = formatIqdKurdish(v) + arrowHtml;
+  });
+  lastRaw[id] = newRaw;
+}
+
+function pulseCard(cardId, up) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  card.classList.remove('pulse-up', 'pulse-down');
+  void card.offsetWidth;
+  card.classList.add(up ? 'pulse-up' : 'pulse-down');
+}
+
+// --- Mini sparkline chart of recent gold prices ---
+const sparkHistory = [];
+const MAX_SPARK_POINTS = 40;
+function pushSparkPoint(value) {
+  if (sparkHistory.length === 0 || sparkHistory[sparkHistory.length - 1] !== value) {
+    sparkHistory.push(value);
+    if (sparkHistory.length > MAX_SPARK_POINTS) sparkHistory.shift();
+  }
+  drawSparkline();
+}
+function drawSparkline() {
+  const canvas = document.getElementById('sparkline');
+  if (!canvas || sparkHistory.length < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  const min = Math.min(...sparkHistory), max = Math.max(...sparkHistory);
+  const range = (max - min) || 1;
+  const up = sparkHistory[sparkHistory.length - 1] >= sparkHistory[0];
+  const style = getComputedStyle(document.documentElement);
+  ctx.strokeStyle = up ? style.getPropertyValue('--green').trim() : style.getPropertyValue('--red').trim();
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  sparkHistory.forEach((v, i) => {
+    const x = (i / (sparkHistory.length - 1)) * w;
+    const y = h - ((v - min) / range) * (h - 6) - 3;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
 }
 
 async function fetchPrices() {
   try {
     const res = await fetch('/price?t=' + Date.now());
     const d = await res.json();
-    setValue('goldOz', d.gold_usd_oz ? '$' + d.gold_usd_oz.toFixed(2) : 'Loading...', d.gold_usd_oz);
-    setAyarValue('ayar24', d.gold_iqd_formatted['24'] || '—', d.gold_iqd['24']);
-    setAyarValue('ayar22', d.gold_iqd_formatted['22'] || '—', d.gold_iqd['22']);
-    setAyarValue('ayar21', d.gold_iqd_formatted['21'] || '—', d.gold_iqd['21']);
-    setAyarValue('ayar18', d.gold_iqd_formatted['18'] || '—', d.gold_iqd['18']);
-    setValue('silverOz', d.silver_usd_oz ? '$' + d.silver_usd_oz.toFixed(2) : '—', d.silver_usd_oz);
-    setValue('silverKg', d.silver_usd_kg ? '$' + fmtIQD(d.silver_usd_kg) : '—', d.silver_usd_kg);
-    setValue('dollarRate', fmtIQD(d.usd_iqd_per_100) + ' د.ع', d.usd_iqd_per_100);
+
+    if (d.gold_usd_oz) {
+      const prevGold = lastRaw['goldOz'];
+      updateDollarValue('goldOz', d.gold_usd_oz, '$', '', 2);
+      pushSparkPoint(d.gold_usd_oz);
+      if (prevGold !== undefined && prevGold !== d.gold_usd_oz) pulseCard('goldCard', d.gold_usd_oz > prevGold);
+    }
+    const prevSilver = lastRaw['silverOz'];
+    if (d.silver_usd_oz) {
+      updateDollarValue('silverOz', d.silver_usd_oz, '$', '', 2);
+      if (prevSilver !== undefined && prevSilver !== d.silver_usd_oz) pulseCard('silverCard', d.silver_usd_oz > prevSilver);
+    }
+    if (d.silver_usd_kg) {
+      updateDollarValue('silverKg', d.silver_usd_kg, '$', '', 0);
+    }
+    updateAyarValue('ayar24', d.gold_iqd['24'] || 0);
+    updateAyarValue('ayar22', d.gold_iqd['22'] || 0);
+    updateAyarValue('ayar21', d.gold_iqd['21'] || 0);
+    updateAyarValue('ayar18', d.gold_iqd['18'] || 0);
+    updateDollarValue('dollarRate', d.usd_iqd_per_100, '', ' د.ع', 0);
+
     document.getElementById('liveLabel').innerText = d.market_open ? 'LIVE' : 'MARKET CLOSED';
     document.getElementById('liveLabel').className = d.market_open ? '' : 'market-closed';
     document.getElementById('statusLine').innerText = 'نوێکراوەتەوە: ' + new Date().toLocaleTimeString();
@@ -1275,7 +1346,8 @@ async function fetchPrices() {
   }
 }
 
-setInterval(fetchPrices, REFRESH_SECONDS * 1000);
+window.addEventListener('resize', drawSparkline);
+setInterval(fetchPrices, 1000);
 fetchPrices();
 </script>
 </body>

@@ -1026,13 +1026,57 @@ def send_web_push_to_all(vapid, title, body):
 
 # ─── PRICE HISTORY (for the dashboard chart) ────────────────
 # Sampled once per real price update (the 30-min scheduled job), NOT once
-# per dashboard poll — otherwise this file would grow by one entry per
-# second per visitor. This gives one real data point per actual price
-# change, which is the right granularity for a "today / this week" chart.
+# per dashboard poll — otherwise this would grow by one entry per second
+# per visitor. This gives one real data point per actual price change,
+# which is the right granularity for a "today / this week" chart.
+#
+# Uses Supabase (a free permanent Postgres database) if SUPABASE_URL and
+# SUPABASE_SERVICE_KEY are set — this is what makes history survive
+# restarts/redeploys, since Render's own disk is wiped on those. Falls
+# back to a local file (which DOES get wiped) if Supabase isn't configured,
+# so the feature still works even before you set that up.
 PRICE_HISTORY_FILE = "price_history.json"
-PRICE_HISTORY_MAX_POINTS = 1000  # ~3 weeks at 30-min intervals
+PRICE_HISTORY_MAX_POINTS = 1000  # local-file fallback cap only (~3 weeks at 30-min intervals)
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+def supabase_configured():
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+
+def _supabase_headers():
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+async def _supabase_insert_price(gold, silver):
+    url = f"{SUPABASE_URL}/rest/v1/price_history"
+    payload = {"gold": gold, "silver": silver}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, json=payload,
+            headers={**_supabase_headers(), "Prefer": "return=minimal"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            resp.raise_for_status()
+
+async def _supabase_get_history(hours):
+    cutoff = (datetime.now(UTC_TZ) - timedelta(hours=hours)).isoformat()
+    url = f"{SUPABASE_URL}/rest/v1/price_history"
+    params = {"select": "t,gold,silver", "t": f"gte.{cutoff}", "order": "t.asc"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url, params=params, headers=_supabase_headers(),
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            resp.raise_for_status()
+            rows = await resp.json()
+    return [{"t": r["t"], "g": r["gold"], "s": r["silver"]} for r in rows]
 
 def load_price_history():
+    """Local-file fallback only — used when Supabase isn't configured."""
     try:
         with open(PRICE_HISTORY_FILE, "r") as f:
             return json.load(f)
@@ -1043,18 +1087,25 @@ def save_price_history(points):
     with open(PRICE_HISTORY_FILE, "w") as f:
         json.dump(points, f)
 
-def append_price_history(gold, silver):
+async def append_price_history(gold, silver):
+    if supabase_configured():
+        try:
+            await _supabase_insert_price(gold, silver)
+            return
+        except Exception as e:
+            print(f"⚠️ Supabase price history insert failed, falling back to local file: {e}")
     points = load_price_history()
-    points.append({
-        "t": datetime.now(UTC_TZ).isoformat(),
-        "g": gold,
-        "s": silver,
-    })
+    points.append({"t": datetime.now(UTC_TZ).isoformat(), "g": gold, "s": silver})
     if len(points) > PRICE_HISTORY_MAX_POINTS:
         points = points[-PRICE_HISTORY_MAX_POINTS:]
     save_price_history(points)
 
-def get_price_history(hours):
+async def get_price_history(hours):
+    if supabase_configured():
+        try:
+            return await _supabase_get_history(hours)
+        except Exception as e:
+            print(f"⚠️ Supabase price history fetch failed, falling back to local file: {e}")
     points = load_price_history()
     cutoff = datetime.now(UTC_TZ) - timedelta(hours=hours)
     result = []
@@ -2097,7 +2148,7 @@ async def send_price_update(bot, message_type="regular"):
         await bot.send_message(chat_id=CHANNEL_ID, text=message)
 
         update_week_data(gold_oz, silver_oz, gold_iqd)
-        append_price_history(gold_oz, silver_oz)
+        await append_price_history(gold_oz, silver_oz)
         save_last_prices(gold_oz, silver_oz)
         print(f"✅ [{message_type}] Sent at {datetime.now(LONDON_TZ).strftime('%H:%M')}")
 
@@ -2441,8 +2492,8 @@ async def main():
                 week = update_week_data(gold, silver, gold_iqd)
             # Seed price history too, so the chart has at least one point
             # right away instead of being empty until the next 30-min job.
-            if not load_price_history() and gold > 0:
-                append_price_history(gold, silver)
+            if not (await get_price_history(24 * 30)) and gold > 0:
+                await append_price_history(gold, silver)
             data = {
                 "gold_usd_oz": gold,
                 "silver_usd_oz": silver,
@@ -2467,7 +2518,7 @@ async def main():
             range_param = request.query.get("range", "24h")
             hours_map = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
             hours = hours_map.get(range_param, 24)
-            points = get_price_history(hours)
+            points = await get_price_history(hours)
             resp = _web.json_response({"points": points})
             resp.headers["Access-Control-Allow-Origin"] = "*"
             return resp

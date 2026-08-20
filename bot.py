@@ -21,6 +21,10 @@ ADMIN_ID = os.environ.get("ADMIN_ID")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 KURDISTAN_RATE_URL = os.environ.get("KURDISTAN_RATE_URL")
+# Uploaded directly to the GitHub repo (binary upload, not the code editor —
+# the file is too large to paste as text). Update the filename here if you
+# name it something else when uploading.
+BACKGROUND_MUSIC_URL = "https://raw.githubusercontent.com/aymen0402/gold-bot/main/background-music.mp3"
 
 LONDON_TZ = pytz.timezone("Europe/London")  # used only for display in messages
 KURDISTAN_TZ = pytz.timezone("Asia/Baghdad")  # Erbil/Sulaymaniyah share this zone, no DST
@@ -810,6 +814,23 @@ def generate_ambient_tone_wav(seconds=10, freq=196.0, sample_rate=22050, volume=
         wav.writeframes(bytes(frames))
     return buf.getvalue()
 
+async def fetch_tts_mp3(text, lang):
+    """Real server-generated speech audio (Google Translate's TTS endpoint),
+    instead of relying on the browser/phone's own installed voices — which
+    is why Persian was silently falling back to English (no Persian voice
+    was installed on the device). This works the same on every device.
+    Limited to ~200 chars per request, which is plenty for our sentences."""
+    url = "https://translate.google.com/translate_tts"
+    params = {"ie": "UTF-8", "q": text[:200], "tl": lang, "client": "tw-ob"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url, params=params,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; GoldBot/1.0)"},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            resp.raise_for_status()
+            return await resp.read()
+
 async def get_gold_price_for_speech():
     """Uses the cached last-known price if fresh; otherwise fetches live.
     This matters because Render's free disk is ephemeral and the cache
@@ -863,11 +884,12 @@ RADIO_HTML = """<!DOCTYPE html>
 <br><br>
 <button id="playBtn" onclick="startRadio()">▶️ Start</button>
 <div id="status">Choose an interval, then press Start</div>
-<audio id="tone" src="/radio-tone.wav" loop preload="auto"></audio>
+<audio id="music" src="/background-music.mp3" loop preload="auto"></audio>
 <script>
 let minutes = parseInt(localStorage.getItem('radioMinutes') || '5');
 let timer = null;
 let started = false;
+const music = document.getElementById('music');
 
 function highlightButtons() {
   document.getElementById('btn1').className = minutes === 1 ? 'active' : '';
@@ -881,22 +903,26 @@ function setInterval_(m) {
   if (started) scheduleNext();
 }
 
-function speak(text, lang) {
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = lang;
-  u.rate = 0.95;
-  window.speechSynthesis.speak(u);
+function playAudioAndWait(url) {
+  return new Promise((resolve) => {
+    const a = new Audio(url + '?t=' + Date.now());
+    a.onended = resolve;
+    a.onerror = resolve;
+    a.play().catch(resolve);
+  });
 }
 
 async function speakUpdate() {
+  document.getElementById('status').innerText = 'Speaking update...';
+  music.volume = 0.15; // duck the music while the voice speaks
   try {
-    const en = await (await fetch('/speak')).text();
-    const fa = await (await fetch('/speak-fa')).text();
-    speak(en, 'en-US');
-    setTimeout(() => speak(fa, 'fa-IR'), 4500);
+    await playAudioAndWait('/speak-en.mp3');
+    await playAudioAndWait('/speak-fa.mp3');
   } catch (e) {
     document.getElementById('status').innerText = 'Could not fetch price: ' + e;
   }
+  music.volume = 0.5;
+  document.getElementById('status').innerText = 'Playing — updates every ' + minutes + ' min';
 }
 
 function scheduleNext() {
@@ -905,9 +931,8 @@ function scheduleNext() {
 }
 
 function startRadio() {
-  const tone = document.getElementById('tone');
-  tone.volume = 0.5;
-  tone.play();
+  music.volume = 0.5;
+  music.play();
   started = true;
   document.getElementById('playBtn').innerText = '⏸ Playing...';
   document.getElementById('status').innerText = 'Playing — updates every ' + minutes + ' min';
@@ -1381,17 +1406,42 @@ async def main():
         async def _speak(request):
             """Plain-text sentence for iOS Shortcuts: fetch this URL, feed
             the raw response straight into a 'Speak Text' action — no JSON
-            parsing needed."""
+            parsing needed. (Shortcuts uses iOS's own TTS engine directly,
+            so this text-only version is fine and doesn't need the mp3 fix.)"""
             return _web.Response(text=await build_speak_sentence_en())
 
         async def _speak_fa(request):
             return _web.Response(text=await build_speak_sentence_fa(), charset="utf-8")
 
+        async def _speak_en_mp3(request):
+            """Real generated speech audio for the /radio page — works the
+            same on every device, unlike relying on the browser's own
+            (often missing) voices."""
+            text = await build_speak_sentence_en()
+            try:
+                mp3 = await fetch_tts_mp3(text, "en")
+                return _web.Response(body=mp3, content_type="audio/mpeg")
+            except Exception as e:
+                print(f"⚠️ TTS (en) failed: {e}")
+                return _web.Response(status=502, text="TTS failed")
+
+        async def _speak_fa_mp3(request):
+            text = await build_speak_sentence_fa()
+            try:
+                mp3 = await fetch_tts_mp3(text, "fa")
+                return _web.Response(body=mp3, content_type="audio/mpeg")
+            except Exception as e:
+                print(f"⚠️ TTS (fa) failed: {e}")
+                return _web.Response(status=502, text="TTS failed")
+
+        async def _background_music(request):
+            """Redirects to the music file you upload directly to the
+            GitHub repo (binary upload via GitHub's web UI, not the code
+            editor — the file is too large to paste as text)."""
+            raise _web.HTTPFound(BACKGROUND_MUSIC_URL)
+
         async def _radio_page(request):
             return _web.Response(text=RADIO_HTML, content_type="text/html")
-
-        async def _radio_tone(request):
-            return _web.Response(body=_RADIO_TONE_BYTES, content_type="audio/wav")
 
         async def _price_json(request):
             """JSON version, in case you want the raw numbers instead."""
@@ -1403,14 +1453,14 @@ async def main():
                 "usd_iqd": rate,
             })
 
-        _RADIO_TONE_BYTES = generate_ambient_tone_wav()
-
         _health_app = _web.Application()
         _health_app.router.add_get("/", _health)
         _health_app.router.add_get("/speak", _speak)
         _health_app.router.add_get("/speak-fa", _speak_fa)
+        _health_app.router.add_get("/speak-en.mp3", _speak_en_mp3)
+        _health_app.router.add_get("/speak-fa.mp3", _speak_fa_mp3)
+        _health_app.router.add_get("/background-music.mp3", _background_music)
         _health_app.router.add_get("/radio", _radio_page)
-        _health_app.router.add_get("/radio-tone.wav", _radio_tone)
         _health_app.router.add_get("/price", _price_json)
         _runner = _web.AppRunner(_health_app)
         await _runner.setup()

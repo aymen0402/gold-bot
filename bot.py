@@ -1236,6 +1236,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     display: block; margin: 20px auto 0; padding: 8px 20px; border-radius: 10px;
     border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--fg); font-size: 0.85em;
   }
+  .calc-mode-switch { display: flex; gap: 8px; margin-bottom: 12px; }
+  .calc-mode {
+    flex: 1; padding: 8px; border-radius: 10px; border: 1px solid var(--btn-border);
+    background: var(--btn-bg); color: var(--fg); font-size: 0.9em; opacity: 0.6;
+  }
+  .calc-mode.active { opacity: 1; border-color: var(--gold); font-weight: 700; }
+  .calc-input {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--card-border);
+    background: var(--box-bg); color: var(--fg); font-size: 1.2em; text-align: center;
+    margin-bottom: 14px; font-variant-numeric: tabular-nums;
+  }
+  .calc-results { display: flex; flex-direction: column; gap: 8px; }
+  .calc-row {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--box-bg); border-radius: 10px; padding: 10px 12px; font-size: 0.9em;
+  }
+  .calc-row .calc-label { color: var(--muted); }
+  .calc-row .calc-value { font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -1297,6 +1315,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="ayar-box"><div class="name">بەرزترین — High</div><div class="amount" id="weekHigh">—</div></div>
       <div class="ayar-box"><div class="name">نزمترین — Low</div><div class="amount" id="weekLow">—</div></div>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🧮 حیسابکەر — Calculator</div>
+    <div class="calc-mode-switch">
+      <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
+      <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
+    </div>
+    <input type="number" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
+    <div id="calcResults" class="calc-results"></div>
   </div>
 
   <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
@@ -1519,9 +1547,60 @@ async function fetchPrices() {
     document.getElementById('liveLabel').innerText = d.market_open ? 'LIVE' : 'MARKET CLOSED';
     document.getElementById('liveLabel').className = d.market_open ? '' : 'market-closed';
     document.getElementById('statusLine').innerText = 'نوێکراوەتەوە: ' + new Date().toLocaleTimeString();
+
+    latestPrices = d;
+    runCalculator();
   } catch (e) {
     document.getElementById('statusLine').innerText = 'هەڵە لە وەرگرتنی نرخ: ' + e;
   }
+}
+
+// --- Calculator ---
+let latestPrices = null;
+let calcMode = 'usd'; // 'usd' or 'iqd'
+
+function setCalcMode(mode) {
+  calcMode = mode;
+  document.getElementById('calcModeUsd').className = 'calc-mode' + (mode === 'usd' ? ' active' : '');
+  document.getElementById('calcModeIqd').className = 'calc-mode' + (mode === 'iqd' ? ' active' : '');
+  document.getElementById('calcInput').placeholder = mode === 'usd' ? 'بۆ نموونە: 10000' : 'بۆ نموونە: 15000000';
+  runCalculator();
+}
+
+function runCalculator() {
+  const resultsEl = document.getElementById('calcResults');
+  const raw = document.getElementById('calcInput').value;
+  const amount = parseFloat(raw);
+  if (!latestPrices || !amount || amount <= 0) {
+    resultsEl.innerHTML = '';
+    return;
+  }
+  const d = latestPrices;
+  const usdAmount = calcMode === 'usd' ? amount : amount / d.usd_iqd;
+  const iqdAmount = calcMode === 'iqd' ? amount : amount * d.usd_iqd;
+
+  let html = '';
+  html += `<div class="calc-row"><span class="calc-label">${calcMode === 'usd' ? 'بە دینار — In IQD' : 'بە دۆلار — In USD'}</span><span class="calc-value">${calcMode === 'usd' ? fmtIQD(iqdAmount) + ' د.ع' : '$' + usdAmount.toFixed(2)}</span></div>`;
+
+  const ayarLabels = { '24': 'عەیار ٢٤', '22': 'عەیار ٢٢', '21': 'عەیار ٢١', '18': 'عەیار ١٨' };
+  for (const k of ['24', '22', '21', '18']) {
+    const pricePerMithqal = d.gold_iqd[k];
+    if (pricePerMithqal > 0) {
+      const mithqal = iqdAmount / pricePerMithqal;
+      html += `<div class="calc-row"><span class="calc-label">🏅 ${ayarLabels[k]} — مثقال</span><span class="calc-value">${mithqal.toFixed(2)}</span></div>`;
+    }
+  }
+
+  if (d.silver_usd_oz > 0) {
+    const silverOz = usdAmount / d.silver_usd_oz;
+    html += `<div class="calc-row"><span class="calc-label">🥈 زیو — ئۆنس (Silver oz)</span><span class="calc-value">${silverOz.toFixed(2)}</span></div>`;
+  }
+  if (d.silver_usd_kg > 0) {
+    const silverKg = usdAmount / d.silver_usd_kg;
+    html += `<div class="calc-row"><span class="calc-label">🥈 زیو — کیلۆ (Silver kg)</span><span class="calc-value">${silverKg.toFixed(3)}</span></div>`;
+  }
+
+  resultsEl.innerHTML = html;
 }
 
 window.addEventListener('resize', drawSparkline);

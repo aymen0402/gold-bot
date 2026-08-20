@@ -1,5 +1,6 @@
 import os
 import asyncio
+import signal
 import aiohttp
 import json
 import xml.etree.ElementTree as ET
@@ -331,24 +332,33 @@ async def get_usd_iqd_rate(force_refresh=False):
         print(f"⚠️ Using saved Kurdistan bazar USD/IQD rate: {e}")
         return load_rate(), "نرخی بازاڕی دەستی"
 
-# ─── USD/TOMAN RATE (bon-bast.com) ──────────────────────────
-BONBAST_URL = "https://www.bon-bast.com/"
+# ─── USD/TOMAN RATE (tgju.org) ───────────────────────────────
+# Previously scraped bon-bast.com, but that site now sits behind a
+# Cloudflare "Just a moment..." JS challenge and blocks every plain HTTP
+# request (not just this bot — any non-browser client gets the same
+# challenge page instead of the rate). tgju.org's public ajax feed is what
+# many independent Iranian price trackers use instead: no auth, no
+# Cloudflare gate, updates live. It reports the free-market USD price in
+# Rial; Toman = Rial / 10 (Iran's own everyday unit).
+TGJU_URL = "https://call4.tgju.org/ajax.json"
 TOMAN_RATE_FILE = "usd_toman_rate.txt"
 TOMAN_RATE_META_FILE = "usd_toman_rate_meta.json"
 
 async def fetch_usd_toman_rate():
     async with aiohttp.ClientSession() as session:
         async with session.get(
-            BONBAST_URL,
+            TGJU_URL,
             timeout=aiohttp.ClientTimeout(total=10),
             headers={"User-Agent": "Mozilla/5.0 (compatible; GoldBot/1.0)"},
         ) as resp:
             resp.raise_for_status()
-            html = await resp.text()
-    m = _re.search(r"USD(?!T)\b.{0,80}?([\d,]{5,7})", html, _re.DOTALL)
-    if not m:
-        raise RuntimeError("USD/Toman rate not found on bon-bast.com — page format may have changed")
-    rate = float(m.group(1).replace(",", ""))
+            data = await resp.json(content_type=None)
+    try:
+        rial_str = data["current"]["price_dollar_rl"]["p"]
+    except (KeyError, TypeError):
+        raise RuntimeError("USD/Toman rate not found in tgju.org feed — response format may have changed")
+    rial = float(str(rial_str).replace(",", ""))
+    rate = rial / 10  # Rial → Toman
     if not (10_000 < rate < 1_000_000):
         raise RuntimeError(f"USD/Toman rate {rate} out of sane range — likely a parsing error")
     return rate
@@ -911,6 +921,96 @@ def generate_qr_code(url):
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+def _card_font(size):
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+def generate_price_card(gold, silver, gold_iqd, usd_iqd, usd_toman=0):
+    """A branded, shareable PNG price card (1080x1080 — square works on
+    WhatsApp, Instagram, Telegram alike) for the dashboard's Share button.
+    Same 'draw everything, no image assets' approach as the app icon and
+    QR code above. Text is kept to Latin letters and digits only — Pillow's
+    built-in default font has no Arabic/Kurdish script support, so Kurdish
+    labels would render as empty boxes here."""
+    # H has headroom for the tallest layout (both the ayar grid and the
+    # USD/Toman row present) plus a footer that never collides with content —
+    # measured empirically against the actual font metrics, not guessed.
+    W, H = 1080, 1250
+    BG, GOLD, SILVER, GREEN, MUTED, BOX_BG, LINE = (
+        "#0d0d0d", "#f5c542", "#c9c9c9", "#3ddc84", "#8a8a8a", "#1a1a1a", "#333333"
+    )
+
+    img = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img)
+
+    def center_text(y, text, size, fill):
+        f = _card_font(size)
+        bbox = draw.textbbox((0, 0), text, font=f)
+        tw = bbox[2] - bbox[0]
+        draw.text(((W - tw) / 2 - bbox[0], y), text, fill=fill, font=f)
+        return y + (bbox[3] - bbox[1])
+
+    def price_row(y, label, value, color):
+        draw.text((90, y), label, fill=MUTED, font=_card_font(30))
+        f_value = _card_font(52)
+        bbox = draw.textbbox((0, 0), value, font=f_value)
+        tw = bbox[2] - bbox[0]
+        draw.text((W - 90 - tw, y - 8), value, fill=color, font=f_value)
+        return y + 78
+
+    # Coin icon, same look as the app icon
+    coin_d = 130
+    coin_x, coin_y = (W - coin_d) / 2, 60
+    draw.ellipse([coin_x, coin_y, coin_x + coin_d, coin_y + coin_d], fill=GOLD)
+    f_coin = _card_font(56)
+    bbox = draw.textbbox((0, 0), "Au", font=f_coin)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text((coin_x + (coin_d - tw) / 2 - bbox[0], coin_y + (coin_d - th) / 2 - bbox[1]),
+               "Au", fill="#111111", font=f_coin)
+
+    y = coin_y + coin_d + 30
+    y = center_text(y, "GOLD & SILVER", 52, GOLD)
+    y = center_text(y + 6, "KURDISTAN", 30, MUTED)
+
+    y += 40
+    draw.line([(90, y), (W - 90, y)], fill=LINE, width=2)
+    y += 40
+
+    y = price_row(y, "GOLD (per oz)", f"${gold:,.2f}", GOLD)
+    y = price_row(y, "SILVER (per oz)", f"${silver:,.2f}", SILVER)
+
+    y += 20
+    draw.line([(90, y), (W - 90, y)], fill=LINE, width=2)
+    y += 40
+
+    # 2x2 ayar grid, IQD per mithqal (same unit as the dashboard's cards)
+    box_gap, box_h = 24, 140
+    box_w = (W - 180 - box_gap) / 2
+    for i, ayar in enumerate((24, 22, 21, 18)):
+        col, row = i % 2, i // 2
+        bx = 90 + col * (box_w + box_gap)
+        by = y + row * (box_h + box_gap)
+        draw.rounded_rectangle([bx, by, bx + box_w, by + box_h], radius=16, fill=BOX_BG)
+        draw.text((bx + 20, by + 18), f"{ayar}K / MITHQAL", fill=MUTED, font=_card_font(26))
+        draw.text((bx + 20, by + 60), f"{gold_iqd.get(ayar, 0):,.0f} IQD", fill=GOLD, font=_card_font(30))
+
+    y += 2 * box_h + box_gap + 40
+    draw.line([(90, y), (W - 90, y)], fill=LINE, width=2)
+    y += 40
+
+    y = price_row(y, "USD / IQD (100$)", f"{usd_iqd * 100:,.0f} IQD", GREEN)
+    if usd_toman and usd_toman > 0:
+        y = price_row(y, "USD / TOMAN", f"{usd_toman:,.0f}", GREEN)
+
+    now = datetime.now(LONDON_TZ)
+    center_text(H - 70, f"t.me/nrxitala   |   {now.strftime('%d %b %Y, %H:%M')} London", 24, MUTED)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
 MANIFEST_JSON = """{
   "name": "زێڕ و زیو - Gold & Silver Kurdistan",
   "short_name": "زێڕ و زیو",
@@ -1026,57 +1126,13 @@ def send_web_push_to_all(vapid, title, body):
 
 # ─── PRICE HISTORY (for the dashboard chart) ────────────────
 # Sampled once per real price update (the 30-min scheduled job), NOT once
-# per dashboard poll — otherwise this would grow by one entry per second
-# per visitor. This gives one real data point per actual price change,
-# which is the right granularity for a "today / this week" chart.
-#
-# Uses Supabase (a free permanent Postgres database) if SUPABASE_URL and
-# SUPABASE_SERVICE_KEY are set — this is what makes history survive
-# restarts/redeploys, since Render's own disk is wiped on those. Falls
-# back to a local file (which DOES get wiped) if Supabase isn't configured,
-# so the feature still works even before you set that up.
+# per dashboard poll — otherwise this file would grow by one entry per
+# second per visitor. This gives one real data point per actual price
+# change, which is the right granularity for a "today / this week" chart.
 PRICE_HISTORY_FILE = "price_history.json"
-PRICE_HISTORY_MAX_POINTS = 1000  # local-file fallback cap only (~3 weeks at 30-min intervals)
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-
-def supabase_configured():
-    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
-
-def _supabase_headers():
-    return {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-async def _supabase_insert_price(gold, silver):
-    url = f"{SUPABASE_URL}/rest/v1/price_history"
-    payload = {"gold": gold, "silver": silver}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url, json=payload,
-            headers={**_supabase_headers(), "Prefer": "return=minimal"},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            resp.raise_for_status()
-
-async def _supabase_get_history(hours):
-    cutoff = (datetime.now(UTC_TZ) - timedelta(hours=hours)).isoformat()
-    url = f"{SUPABASE_URL}/rest/v1/price_history"
-    params = {"select": "t,gold,silver", "t": f"gte.{cutoff}", "order": "t.asc"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            url, params=params, headers=_supabase_headers(),
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            resp.raise_for_status()
-            rows = await resp.json()
-    return [{"t": r["t"], "g": r["gold"], "s": r["silver"]} for r in rows]
+PRICE_HISTORY_MAX_POINTS = 1000  # ~3 weeks at 30-min intervals
 
 def load_price_history():
-    """Local-file fallback only — used when Supabase isn't configured."""
     try:
         with open(PRICE_HISTORY_FILE, "r") as f:
             return json.load(f)
@@ -1087,25 +1143,18 @@ def save_price_history(points):
     with open(PRICE_HISTORY_FILE, "w") as f:
         json.dump(points, f)
 
-async def append_price_history(gold, silver):
-    if supabase_configured():
-        try:
-            await _supabase_insert_price(gold, silver)
-            return
-        except Exception as e:
-            print(f"⚠️ Supabase price history insert failed, falling back to local file: {e}")
+def append_price_history(gold, silver):
     points = load_price_history()
-    points.append({"t": datetime.now(UTC_TZ).isoformat(), "g": gold, "s": silver})
+    points.append({
+        "t": datetime.now(UTC_TZ).isoformat(),
+        "g": gold,
+        "s": silver,
+    })
     if len(points) > PRICE_HISTORY_MAX_POINTS:
         points = points[-PRICE_HISTORY_MAX_POINTS:]
     save_price_history(points)
 
-async def get_price_history(hours):
-    if supabase_configured():
-        try:
-            return await _supabase_get_history(hours)
-        except Exception as e:
-            print(f"⚠️ Supabase price history fetch failed, falling back to local file: {e}")
+def get_price_history(hours):
     points = load_price_history()
     cutoff = datetime.now(UTC_TZ) - timedelta(hours=hours)
     result = []
@@ -1275,7 +1324,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   body {
     font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
-    background: var(--bg); color: var(--fg); margin: 0; padding: 20px 16px 90px;
+    background: var(--bg); color: var(--fg); margin: 0; padding: 20px 16px 60px;
     transition: background 0.2s, color 0.2s;
   }
   .theme-switcher { display: flex; justify-content: center; gap: 6px; margin-bottom: 16px; }
@@ -1307,10 +1356,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
   .price-oz .label { color: var(--muted); font-size: 0.9em; }
   .price-oz .value { font-size: 1.6em; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .sparkline { width: 100%; height: 220px; display: block; margin-bottom: 6px; }
+  .sparkline { width: 100%; height: 120px; display: block; margin-bottom: 6px; }
   .chart-range-switch { display: flex; gap: 6px; margin-bottom: 10px; }
-  .chart-range-switch button { flex: 1; padding: 8px; font-size: 0.85em; }
-  .chart-note { text-align: center; color: var(--muted); font-size: 0.75em; margin-bottom: 4px; }
+  .chart-range-switch button { flex: 1; padding: 6px; font-size: 0.8em; }
+  .chart-note { text-align: center; color: var(--muted); font-size: 0.75em; margin-bottom: 14px; }
   .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .ayar-box { background: var(--box-bg); border-radius: 10px; padding: 10px 12px; }
   .ayar-box .name { font-size: 0.8em; color: var(--muted); }
@@ -1351,22 +1400,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .calc-row .calc-label { color: var(--muted); }
   .calc-row .calc-value { font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; }
-
-  /* --- Tab navigation --- */
-  .tab-panel { display: none; }
-  .tab-panel.active { display: block; }
-  .bottom-nav {
-    position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
-    display: flex; background: var(--card-bg); border-top: 1px solid var(--card-border);
-    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
-  }
-  .bottom-nav button {
-    flex: 1; background: none; border: none; color: var(--muted);
-    display: flex; flex-direction: column; align-items: center; gap: 2px;
-    padding: 6px 2px; font-size: 0.7em;
-  }
-  .bottom-nav button .nav-icon { font-size: 1.3em; }
-  .bottom-nav button.active { color: var(--gold); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -1381,140 +1414,105 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="live-badge"><span class="live-dot"></span><span id="liveLabel">LIVE</span></div>
   </div>
 
-  <!-- ═══ TAB: Prices ═══ -->
-  <div class="tab-panel active" id="tab-prices">
-    <div class="card" id="goldCard">
-      <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
-      <div class="price-oz">
-        <span class="label">1 oz (ئۆنسێک)</span>
-        <span class="value" id="goldOz">Loading...</span>
-      </div>
-      <div class="ayar-grid">
-        <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
-        <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
-        <div class="ayar-box"><div class="name">عەیار ٢١ — Ayar 21</div><div class="amount" id="ayar21">—</div><div class="unit">IQD / مثقال</div></div>
-        <div class="ayar-box"><div class="name">عەیار ١٨ — Ayar 18</div><div class="amount" id="ayar18">—</div><div class="unit">IQD / مثقال</div></div>
-      </div>
+  <div class="card" id="goldCard">
+    <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
+    <div class="price-oz">
+      <span class="label">1 oz (ئۆنسێک)</span>
+      <span class="value" id="goldOz">Loading...</span>
     </div>
-
-    <div class="card" id="silverCard">
-      <div class="card-title">🥈 Silver Prices نرخی زیو</div>
-      <div class="ayar-grid">
-        <div class="ayar-box"><div class="name">Per oz — ئۆنسێک</div><div class="amount" id="silverOz">—</div></div>
-        <div class="ayar-box"><div class="name">Per kg — یەک کیلۆ</div><div class="amount" id="silverKg">—</div></div>
-      </div>
+    <div class="chart-range-switch">
+      <button id="rangeToday" class="calc-mode active" onclick="setChartRange('24h')">ئەمڕۆ — Today</button>
+      <button id="range7d" class="calc-mode" onclick="setChartRange('7d')">هەفتە — Week</button>
+      <button id="range30d" class="calc-mode" onclick="setChartRange('30d')">مانگ — Month</button>
     </div>
-
-    <div class="card">
-      <div class="card-title">💵 Dollar Rate نرخی دۆلار</div>
-      <div class="dollar-row">
-        <span class="label">100 دۆلار — USD 100</span>
-        <span class="amount" id="dollarRate">—</span>
-      </div>
-    </div>
-
-    <div class="card" id="tomanCard" style="display:none">
-      <div class="card-title">🇮🇷 Toman Rate نرخی تمەن</div>
-      <div class="dollar-row">
-        <span class="label">1 دۆلار — USD 1</span>
-        <span class="amount" id="tomanRate">—</span>
-      </div>
+    <canvas class="sparkline" id="sparkline"></canvas>
+    <div class="chart-note" id="chartNote"></div>
+    <div class="ayar-grid">
+      <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
+      <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
+      <div class="ayar-box"><div class="name">عەیار ٢١ — Ayar 21</div><div class="amount" id="ayar21">—</div><div class="unit">IQD / مثقال</div></div>
+      <div class="ayar-box"><div class="name">عەیار ١٨ — Ayar 18</div><div class="amount" id="ayar18">—</div><div class="unit">IQD / مثقال</div></div>
     </div>
   </div>
 
-  <!-- ═══ TAB: Chart ═══ -->
-  <div class="tab-panel" id="tab-chart">
-    <div class="card">
-      <div class="card-title">📈 Gold Chart داهاتووی نرخ</div>
-      <div class="price-oz">
-        <span class="label">1 oz (ئۆنسێک)</span>
-        <span class="value" id="goldOzChart">—</span>
-      </div>
-      <div class="chart-range-switch">
-        <button id="rangeToday" class="calc-mode active" onclick="setChartRange('24h')">ئەمڕۆ — Today</button>
-        <button id="range7d" class="calc-mode" onclick="setChartRange('7d')">هەفتە — Week</button>
-        <button id="range30d" class="calc-mode" onclick="setChartRange('30d')">مانگ — Month</button>
-      </div>
-      <canvas class="sparkline" id="sparkline"></canvas>
-      <div class="chart-note" id="chartNote"></div>
+  <div class="card" id="silverCard">
+    <div class="card-title">🥈 Silver Prices نرخی زیو</div>
+    <div class="ayar-grid">
+      <div class="ayar-box"><div class="name">Per oz — ئۆنسێک</div><div class="amount" id="silverOz">—</div></div>
+      <div class="ayar-box"><div class="name">Per kg — یەک کیلۆ</div><div class="amount" id="silverKg">—</div></div>
     </div>
   </div>
 
-  <!-- ═══ TAB: Calculator ═══ -->
-  <div class="tab-panel" id="tab-calculator">
-    <div class="card">
-      <div class="card-title">🧮 حیسابکەر — Calculator</div>
+  <div class="card">
+    <div class="card-title">💵 Dollar Rate نرخی دۆلار</div>
+    <div class="dollar-row">
+      <span class="label">100 دۆلار — USD 100</span>
+      <span class="amount" id="dollarRate">—</span>
+    </div>
+  </div>
+
+  <div class="card" id="tomanCard" style="display:none">
+    <div class="card-title">🇮🇷 Toman Rate نرخی تمەن</div>
+    <div class="dollar-row">
+      <span class="label">1 دۆلار — USD 1</span>
+      <span class="amount" id="tomanRate">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📅 پوختەی هەفتانە — Weekly Summary</div>
+    <div class="ayar-grid">
+      <div class="ayar-box"><div class="name">کردنەوە — Open</div><div class="amount" id="weekOpen">—</div></div>
+      <div class="ayar-box"><div class="name">داخستن — Close</div><div class="amount" id="weekClose">—</div></div>
+      <div class="ayar-box"><div class="name">بەرزترین — High</div><div class="amount" id="weekHigh">—</div></div>
+      <div class="ayar-box"><div class="name">نزمترین — Low</div><div class="amount" id="weekLow">—</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🧮 حیسابکەر — Calculator</div>
+    <div class="calc-mode-switch">
+      <button id="calcTabMoney" class="calc-mode active" onclick="setCalcTab('money')">💰 پارە — Money</button>
+      <button id="calcTabWeight" class="calc-mode" onclick="setCalcTab('weight')">⚖️ کێش — Weight</button>
+    </div>
+
+    <div id="calcMoneyPanel">
       <div class="calc-mode-switch">
-        <button id="calcTabMoney" class="calc-mode active" onclick="setCalcTab('money')">💰 پارە — Money</button>
-        <button id="calcTabWeight" class="calc-mode" onclick="setCalcTab('weight')">⚖️ کێش — Weight</button>
+        <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
+        <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
       </div>
+      <input type="number" inputmode="decimal" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
+      <div id="calcResults" class="calc-results"></div>
+    </div>
 
-      <div id="calcMoneyPanel">
-        <div class="calc-mode-switch">
-          <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
-          <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
-        </div>
-        <input type="number" inputmode="decimal" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
-        <div id="calcResults" class="calc-results"></div>
+    <div id="calcWeightPanel" style="display:none">
+      <div class="calc-mode-switch">
+        <button id="calcUnitMithqal" class="calc-mode active" onclick="setCalcUnit('mithqal')">مثقال</button>
+        <button id="calcUnitGram" class="calc-mode" onclick="setCalcUnit('gram')">گرام — Gram</button>
       </div>
-
-      <div id="calcWeightPanel" style="display:none">
-        <div class="calc-mode-switch">
-          <button id="calcUnitMithqal" class="calc-mode active" onclick="setCalcUnit('mithqal')">مثقال</button>
-          <button id="calcUnitGram" class="calc-mode" onclick="setCalcUnit('gram')">گرام — Gram</button>
-        </div>
-        <input type="number" inputmode="decimal" id="calcWeightInput" class="calc-input" placeholder="بۆ نموونە: 10" oninput="runWeightCalculator()">
-        <div id="calcWeightResults" class="calc-results"></div>
-      </div>
+      <input type="number" inputmode="decimal" id="calcWeightInput" class="calc-input" placeholder="بۆ نموونە: 10" oninput="runWeightCalculator()">
+      <div id="calcWeightResults" class="calc-results"></div>
     </div>
   </div>
 
-  <!-- ═══ TAB: More ═══ -->
-  <div class="tab-panel" id="tab-more">
-    <div class="card">
-      <div class="card-title">📅 پوختەی هەفتانە — Weekly Summary</div>
-      <div class="ayar-grid">
-        <div class="ayar-box"><div class="name">کردنەوە — Open</div><div class="amount" id="weekOpen">—</div></div>
-        <div class="ayar-box"><div class="name">داخستن — Close</div><div class="amount" id="weekClose">—</div></div>
-        <div class="ayar-box"><div class="name">بەرزترین — High</div><div class="amount" id="weekHigh">—</div></div>
-        <div class="ayar-box"><div class="name">نزمترین — Low</div><div class="amount" id="weekLow">—</div></div>
-      </div>
-    </div>
+  <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
+  <button class="notif-btn" id="notifBtn" onclick="enablePush()">🔔 چالاککردنی ئاگادارکردنەوە — Enable price alerts</button>
+  <button class="notif-btn" id="shareBtn" onclick="shareCard()">📤 هاوبەشکردنی نرخەکان — Share prices</button>
 
-    <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
-    <button class="notif-btn" id="notifBtn" onclick="enablePush()">🔔 چالاککردنی ئاگادارکردنەوە — Enable price alerts</button>
-
-    <div style="text-align:center; margin-top:24px;">
-      <img src="/qr-code.png" alt="QR code" style="width:120px; height:120px; border-radius:12px; background:#fff; padding:8px;">
-      <div class="status-line">سکان بکە بۆ کردنەوەی ئەم پەڕەیە — Scan to open</div>
-    </div>
-
-    <footer>
-      <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
-    </footer>
-    <div class="home-note" id="homeNote">
-      📲 <b>Add to Home Screen:</b> tap Share → "Add to Home Screen"<br>
-      بیخەرە سەر شاشەی مۆبایل: Share → Add to Home Screen
-    </div>
+  <div style="text-align:center; margin-top:24px;">
+    <img src="/qr-code.png" alt="QR code" style="width:120px; height:120px; border-radius:12px; background:#fff; padding:8px;">
+    <div class="status-line">سکان بکە بۆ کردنەوەی ئەم پەڕەیە — Scan to open</div>
   </div>
 
-  <!-- ═══ Bottom Tab Navigation ═══ -->
-  <div class="bottom-nav">
-    <button id="navPrices" class="active" onclick="showTab('prices')"><span class="nav-icon">🏅</span>نرخەکان</button>
-    <button id="navChart" onclick="showTab('chart')"><span class="nav-icon">📈</span>چارت</button>
-    <button id="navCalculator" onclick="showTab('calculator')"><span class="nav-icon">🧮</span>حیسابکەر</button>
-    <button id="navMore" onclick="showTab('more')"><span class="nav-icon">☰</span>زیاتر</button>
+  <footer>
+    <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
+  </footer>
+  <div class="home-note" id="homeNote">
+    📲 <b>Add to Home Screen:</b> tap Share → "Add to Home Screen"<br>
+    بیخەرە سەر شاشەی مۆبایل: Share → Add to Home Screen
   </div>
 
 <script>
-function showTab(name) {
-  ['prices', 'chart', 'calculator', 'more'].forEach(t => {
-    document.getElementById('tab-' + t).className = 'tab-panel' + (t === name ? ' active' : '');
-    document.getElementById('nav' + t.charAt(0).toUpperCase() + t.slice(1)).className = (t === name ? 'active' : '');
-  });
-  if (name === 'chart') drawSparkline();
-}
-
 const isStandalone = window.navigator.standalone === true ||
                       window.matchMedia('(display-mode: standalone)').matches;
 if (isStandalone) document.getElementById('homeNote').style.display = 'none';
@@ -1568,6 +1566,39 @@ async function enablePush() {
   }
 }
 
+async function shareCard() {
+  const btn = document.getElementById('shareBtn');
+  const original = btn.innerText;
+  btn.disabled = true;
+  btn.innerText = '⏳ ...';
+  try {
+    const resp = await fetch('/share-card.png');
+    const blob = await resp.blob();
+    const file = new File([blob], 'gold-silver-prices.png', { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: 'زێڕ و زیو — Gold & Silver Kurdistan',
+        text: 'نرخی زێڕ و زیوی ئەمڕۆ',
+      });
+    } else {
+      // Web Share API (with files) isn't supported on this browser — open
+      // the image in a new tab instead, so the user can long-press it to
+      // save/share manually.
+      window.open('/share-card.png', '_blank');
+    }
+  } catch (e) {
+    // AbortError just means the user closed the native share sheet without
+    // picking anything — not a real failure, no need to fall back.
+    if (e && e.name !== 'AbortError') {
+      window.open('/share-card.png', '_blank');
+    }
+  } finally {
+    btn.disabled = false;
+    btn.innerText = original;
+  }
+}
+
 // --- Smooth number-glide animation (odometer-style) ---
 const animState = {}; // id -> { raw, frame }
 function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
@@ -1601,7 +1632,6 @@ const lastRaw = {};
 
 function updateDollarValue(id, newRaw, prefix, suffix, decimals) {
   const el = document.getElementById(id);
-  if (!el) return;
   const prevRaw = lastRaw[id];
   const render = (v) => (decimals ? v.toFixed(decimals) : fmtIQD(v));
   if (prevRaw === undefined) {
@@ -1618,7 +1648,6 @@ function updateDollarValue(id, newRaw, prefix, suffix, decimals) {
 
 function updateAyarValue(id, newRaw) {
   const el = document.getElementById(id);
-  if (!el) return;
   const prevRaw = lastRaw[id];
   let arrowHtml = '';
   if (prevRaw !== undefined && prevRaw !== newRaw) {
@@ -1679,6 +1708,7 @@ function pushSparkPoint(value) {
   const last = chartPoints[chartPoints.length - 1];
   if (!last || last.g !== value) {
     chartPoints.push({ t: new Date().toISOString(), g: value });
+    // Keep the live-appended tail from growing forever within one session
     if (chartPoints.length > 500) chartPoints.shift();
   }
   drawSparkline();
@@ -1690,7 +1720,6 @@ function drawSparkline() {
   if (!canvas || values.length < 2) return;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (w === 0 || h === 0) return;
   canvas.width = w * dpr; canvas.height = h * dpr;
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
@@ -1709,6 +1738,7 @@ function drawSparkline() {
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
   ctx.stroke();
+  // Light fill under the line for a more "chart-like" look
   ctx.lineTo(w, h);
   ctx.lineTo(0, h);
   ctx.closePath();
@@ -1724,7 +1754,6 @@ async function fetchPrices() {
     if (d.gold_usd_oz) {
       const prevGold = lastRaw['goldOz'];
       updateDollarValue('goldOz', d.gold_usd_oz, '$', '', 2);
-      updateDollarValue('goldOzChart', d.gold_usd_oz, '$', '', 2);
       pushSparkPoint(d.gold_usd_oz);
       if (prevGold !== undefined && prevGold !== d.gold_usd_oz) pulseCard('goldCard', d.gold_usd_oz > prevGold);
     }
@@ -1760,7 +1789,6 @@ async function fetchPrices() {
 
     latestPrices = d;
     runCalculator();
-    runWeightCalculator();
   } catch (e) {
     document.getElementById('statusLine').innerText = 'هەڵە لە وەرگرتنی نرخ: ' + e;
   }
@@ -2120,6 +2148,65 @@ def build_alert_message(metal, old_price, new_price):
         f"⚠️ ئەمە ئاگاداری خێرای بازاڕە؛ بە دینار حیساب نەکراوە."
     )
 
+# ─── PERSONAL PRICE ALERTS (member-set targets) ────────────
+# Anyone who messages the bot can set their own gold-price target with
+# /setalert; when the price crosses it they get a one-time DM. Kept to one
+# active alert per person and no direction argument to remember — the bot
+# figures out "rising to" vs "falling to" from the current price, since
+# most people using this bot aren't developers.
+USER_ALERTS_FILE = "user_alerts.json"
+
+def load_user_alerts():
+    try:
+        with open(USER_ALERTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_user_alerts(alerts):
+    with open(USER_ALERTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(alerts, f, ensure_ascii=False)
+
+def build_user_alert_message(target, current):
+    direction_ku = "گەیشتە" if current >= target else "دابەزییە"
+    return (
+        f"🔔 ئاگاداری نرخی تایبەتی تۆ چالاک بوو!\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 نرخی زێڕ ئێستا: ${current:,.2f}\n"
+        f"🎯 ئامانجی تۆ: ${target:,.2f}\n"
+        f"نرخ {direction_ku} ئامانجەکەت.\n\n"
+        f"ئەم ئاگاداریە بەکارهات و لابرا. بۆ ئاگاداری نوێ: /setalert"
+    )
+
+async def check_user_price_alerts(bot):
+    """Runs every minute. Cheap no-op when nobody has an active alert —
+    only reads the small local alerts file, no network call in that case."""
+    alerts = load_user_alerts()
+    if not alerts:
+        return
+    try:
+        gold, _silver = await get_metals_for_display()
+    except Exception as e:
+        print(f"⚠️ check_user_price_alerts price fetch failed: {e}")
+        return
+    if gold <= 0:
+        return
+    changed = False
+    for chat_id, alert in list(alerts.items()):
+        target = alert.get("target", 0)
+        direction = alert.get("direction", "above")
+        hit = (direction == "above" and gold >= target) or (direction == "below" and gold <= target)
+        if not hit:
+            continue
+        try:
+            await bot.send_message(chat_id=int(chat_id), text=build_user_alert_message(target, gold))
+        except Exception as e:
+            print(f"⚠️ Could not DM price alert to {chat_id}: {e}")
+        del alerts[chat_id]
+        changed = True
+    if changed:
+        save_user_alerts(alerts)
+
 # ─── WEEK DATA TRACKING ───────────────────────────────────
 
 def update_week_data(gold, silver, gold_iqd=None):
@@ -2158,20 +2245,6 @@ def update_week_data(gold, silver, gold_iqd=None):
     return data
 
 # ─── MAIN SEND FUNCTIONS ──────────────────────────────────
-
-async def sample_chart_point():
-    """Runs every 5 minutes, silently — just records a data point for the
-    dashboard chart. Does NOT send any Telegram message (that's what
-    send_price_update does, on its own 30-min schedule). This is what
-    makes the chart actually look 'alive' within an hour instead of
-    needing many 30-min cycles to accumulate visible movement."""
-    if not is_market_open():
-        return
-    try:
-        gold, silver = await get_metals_prices()
-        await append_price_history(gold, silver)
-    except Exception as e:
-        print(f"⚠️ Chart sampling failed: {e}")
 
 async def send_price_update(bot, message_type="regular"):
     if not is_market_open() and message_type == "regular":
@@ -2217,7 +2290,7 @@ async def send_price_update(bot, message_type="regular"):
         await bot.send_message(chat_id=CHANNEL_ID, text=message)
 
         update_week_data(gold_oz, silver_oz, gold_iqd)
-        await append_price_history(gold_oz, silver_oz)
+        append_price_history(gold_oz, silver_oz)
         save_last_prices(gold_oz, silver_oz)
         print(f"✅ [{message_type}] Sent at {datetime.now(LONDON_TZ).strftime('%H:%M')}")
 
@@ -2372,6 +2445,64 @@ async def cmd_price(update, context):
     await update.message.reply_text("⏳ چاوەڕێ بکە...")
     await send_price_update(context.bot, "regular")
 
+async def cmd_setalert(update, context):
+    """Open to everyone — this is a personal alert for the member, not an
+    admin control (unlike setrate/setinterval above)."""
+    chat_id = str(update.effective_chat.id)
+    if not context.args:
+        await update.message.reply_text(
+            "⚠️ نمونە: /setalert 2650\n"
+            "کاتێک نرخی زێڕ گەیشتە ئەو بڕە، پەیامێکت بۆ دەنێردرێت.\n"
+            "بۆ بینینی ئاگاداریەکەت: /myalert\n"
+            "بۆ سڕینەوەی: /clearalert"
+        )
+        return
+    try:
+        target = float(context.args[0].replace(",", ""))
+        if target <= 0:
+            raise ValueError
+    except Exception:
+        await update.message.reply_text("❌ ژمارەیەکی دروست بنووسە. نمونە: /setalert 2650")
+        return
+    try:
+        gold, _silver = await get_metals_for_display()
+    except Exception:
+        gold = 0
+    direction = "above" if gold <= 0 or target >= gold else "below"
+    alerts = load_user_alerts()
+    alerts[chat_id] = {"target": target, "direction": direction}
+    save_user_alerts(alerts)
+    direction_ku = "هەڵکشێت بۆ" if direction == "above" else "دابەزێت بۆ"
+    current_line = f"نرخی ئێستا: ${gold:,.2f}\n" if gold > 0 else ""
+    await update.message.reply_text(
+        f"✅ ئاگاداری چالاک کرا!\n"
+        f"{current_line}"
+        f"کاتێک نرخی زێڕ {direction_ku} ${target:,.2f}، پەیامێکت بۆ دەنێردرێت. 🔔"
+    )
+
+async def cmd_myalert(update, context):
+    chat_id = str(update.effective_chat.id)
+    alert = load_user_alerts().get(chat_id)
+    if not alert:
+        await update.message.reply_text("هیچ ئاگاداریەکی چالاکت نییە.\nبۆ دانانی یەکێک: /setalert 2650")
+        return
+    direction_ku = "هەڵکشێت بۆ" if alert.get("direction") == "above" else "دابەزێت بۆ"
+    await update.message.reply_text(
+        f"🔔 ئاگاداری چالاکت:\n"
+        f"کاتێک نرخی زێڕ {direction_ku} ${alert.get('target', 0):,.2f}، ئاگادار دەکرێیت.\n"
+        f"بۆ سڕینەوەی: /clearalert"
+    )
+
+async def cmd_clearalert(update, context):
+    chat_id = str(update.effective_chat.id)
+    alerts = load_user_alerts()
+    if chat_id in alerts:
+        del alerts[chat_id]
+        save_user_alerts(alerts)
+        await update.message.reply_text("✅ ئاگاداریەکەت سڕایەوە.")
+    else:
+        await update.message.reply_text("هیچ ئاگاداریەکی چالاکت نەبوو.")
+
 async def cmd_news(update, context):
     if not is_admin(update):
         await update.message.reply_text("❌ مۆڵەتت نییە.")
@@ -2427,6 +2558,9 @@ async def cmd_help(update, context):
         "/price — ئێستا نرخەکان بنێرە\n"
         "/news — هەواڵی ئابووری ئەمڕۆ\n"
         "/summary — پوختەی هەفتە\n"
+        "/setalert 2650 — ئاگاداری نرخی تایبەتی خۆت دابنێ\n"
+        "/myalert — ئاگاداری چالاکت ببینە\n"
+        "/clearalert — ئاگاداریەکەت بسڕەوە\n"
         "/setrate 1552.50 — نرخی دۆلار بەدەستی بگۆڕە\n"
         "/setinterval 60 — کاتی ناردنی نرخ بگۆڕە\n"
         "/help — ئەم لیستە"
@@ -2445,6 +2579,9 @@ async def setup_bot_commands(app):
         BotCommand("price", "نرخی زێڕ و زیو بنێرە"),
         BotCommand("news", "هەواڵی ئابووری ئەمڕۆ"),
         BotCommand("summary", "پوختەی هەفتە"),
+        BotCommand("setalert", "ئاگاداری نرخی تایبەتی زێڕ دابنێ"),
+        BotCommand("myalert", "ئاگاداری چالاکت ببینە"),
+        BotCommand("clearalert", "ئاگاداریەکەت بسڕەوە"),
         BotCommand("setrate", "نرخی دۆلار بەدەستی بگۆڕە"),
         BotCommand("setinterval", "کاتی ناردنی نرخ بگۆڕە"),
         BotCommand("help", "فەرمانەکان"),
@@ -2473,6 +2610,7 @@ async def main():
     # port scanner sees it immediately regardless of what happens later
     # (config validation, Telegram API calls, etc.).
     port = os.environ.get("PORT") or "10000"
+    _runner = None  # set inside the try block below; stays None if startup fails
     try:
         from aiohttp import web as _web
         async def _health(request):
@@ -2561,8 +2699,8 @@ async def main():
                 week = update_week_data(gold, silver, gold_iqd)
             # Seed price history too, so the chart has at least one point
             # right away instead of being empty until the next 30-min job.
-            if not (await get_price_history(24 * 30)) and gold > 0:
-                await append_price_history(gold, silver)
+            if not load_price_history() and gold > 0:
+                append_price_history(gold, silver)
             data = {
                 "gold_usd_oz": gold,
                 "silver_usd_oz": silver,
@@ -2587,13 +2725,31 @@ async def main():
             range_param = request.query.get("range", "24h")
             hours_map = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
             hours = hours_map.get(range_param, 24)
-            points = await get_price_history(hours)
+            points = get_price_history(hours)
             resp = _web.json_response({"points": points})
             resp.headers["Access-Control-Allow-Origin"] = "*"
             return resp
 
         async def _dashboard_page(request):
             return _web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+        async def _share_card(request):
+            """Branded PNG price card for the dashboard's Share button —
+            reuses the same cached-first price lookup as /price so it
+            doesn't add an extra live fetch on every share tap."""
+            gold, silver = await get_metals_for_display()
+            rate = load_rate()
+            toman_rate = load_toman_rate()
+            if toman_rate <= 0:
+                try:
+                    toman_rate = await get_usd_toman_rate()
+                except Exception as e:
+                    print(f"⚠️ Toman rate live-fetch for /share-card.png failed: {e}")
+            gold_iqd = calculate_gold(gold, rate) if gold > 0 else {24: 0, 22: 0, 21: 0, 18: 0}
+            png = generate_price_card(gold, silver, gold_iqd, rate, toman_rate)
+            resp = _web.Response(body=png, content_type="image/png")
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
 
         async def _manifest_json(request):
             return _web.Response(text=MANIFEST_JSON, content_type="application/manifest+json")
@@ -2655,6 +2811,7 @@ async def main():
         _health_app.router.add_get("/price", _price_json)
         _health_app.router.add_get("/history", _history_json)
         _health_app.router.add_get("/dashboard", _dashboard_page)
+        _health_app.router.add_get("/share-card.png", _share_card)
         _health_app.router.add_get("/manifest.json", _manifest_json)
         _health_app.router.add_get("/sw.js", _service_worker)
         _health_app.router.add_get("/icon-192.png", _icon_192)
@@ -2683,6 +2840,9 @@ async def main():
     app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("setalert", cmd_setalert))
+    app.add_handler(CommandHandler("myalert", cmd_myalert))
+    app.add_handler(CommandHandler("clearalert", cmd_clearalert))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("setinterval",
         lambda u, c: cmd_setinterval(u, c, scheduler, app.bot)))
@@ -2690,7 +2850,7 @@ async def main():
     # Special market notices are checked every minute. Price updates use the admin interval.
     scheduler.add_job(scheduled_check, CronTrigger(minute="*"), args=[app.bot])
     scheduler.add_job(check_economic_event_alerts, CronTrigger(minute="*"), args=[app.bot])
-    scheduler.add_job(sample_chart_point, CronTrigger(minute="*/5"))
+    scheduler.add_job(check_user_price_alerts, CronTrigger(minute="*"), args=[app.bot])
     saved_interval = load_interval()
     if saved_interval not in ALLOWED_INTERVALS:
         saved_interval = DEFAULT_INTERVAL
@@ -2707,11 +2867,64 @@ async def main():
     await app.initialize()
     await setup_bot_commands(app)
     await app.start()
-    await app.updater.start_polling()
+    # drop_pending_updates=True: on a redeploy, discard whatever queued up
+    # while the old instance was shutting down instead of replaying it —
+    # keeps a fresh instance from double-handling commands sent right
+    # around restart time.
+    await app.updater.start_polling(drop_pending_updates=True)
 
     print(f"🤖 Bot running! Price interval: {load_interval()} min")
-    while True:
-        await asyncio.sleep(60)
+
+    # Render sends SIGTERM before killing the process on every redeploy or
+    # restart. Without handling it, the process gets hard-killed while still
+    # holding Telegram's long-poll connection open, which is the most likely
+    # cause of the "Conflict: terminated by other getUpdates request" errors
+    # that show up after deploys — the old and new instance both end up
+    # polling for a window. Catching SIGTERM lets us close the polling
+    # connection ourselves first, so there's nothing left for the new
+    # instance to collide with.
+    stop_event = asyncio.Event()
+
+    def _request_shutdown(sig_name):
+        print(f"🛑 Received {sig_name}, shutting down gracefully...")
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig_name in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, _request_shutdown, sig_name)
+        except NotImplementedError:
+            # Not available on Windows — fine for local testing, Render is Linux.
+            pass
+
+    await stop_event.wait()
+
+    print("🧹 Shutting down: stopping poller, scheduler, and web server...")
+    try:
+        await app.updater.stop()
+    except Exception as e:
+        print(f"⚠️ updater.stop() failed: {e}")
+    try:
+        await app.stop()
+    except Exception as e:
+        print(f"⚠️ app.stop() failed: {e}")
+    try:
+        await app.shutdown()
+    except Exception as e:
+        print(f"⚠️ app.shutdown() failed: {e}")
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception as e:
+        print(f"⚠️ scheduler.shutdown() failed: {e}")
+    if _runner is not None:
+        try:
+            await _runner.cleanup()
+        except Exception as e:
+            print(f"⚠️ web server cleanup failed: {e}")
+    print("👋 Shutdown complete.")
 
 if __name__ == "__main__":
     asyncio.run(main())

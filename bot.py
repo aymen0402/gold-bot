@@ -808,19 +808,33 @@ def generate_ambient_tone_wav(seconds=8, freq=220.0, sample_rate=22050, volume=0
         wav.writeframes(bytes(frames))
     return buf.getvalue()
 
-def build_speak_sentence_en():
+async def get_gold_price_for_speech():
+    """Uses the cached last-known price if fresh; otherwise fetches live.
+    This matters because Render's free disk is ephemeral and the cache
+    file only gets written by the scheduled job — right after a restart
+    (or wake-from-sleep) it can be empty until that job next runs."""
     last = load_last_prices()
     gold = last.get("gold", 0)
+    if gold > 0:
+        return gold
+    try:
+        gold, _silver = await get_metals_prices()
+        return gold
+    except Exception as e:
+        print(f"⚠️ Live price fetch for /speak failed: {e}")
+        return 0
+
+async def build_speak_sentence_en():
+    gold = await get_gold_price_for_speech()
     if gold <= 0:
-        return "Gold price is not available yet."
+        return "Gold price is not available right now. Please try again shortly."
     return f"Gold is trading at {gold:,.2f} dollars per ounce."
 
-def build_speak_sentence_ku():
-    last = load_last_prices()
-    rate = load_rate()
-    gold = last.get("gold", 0)
+async def build_speak_sentence_ku():
+    gold = await get_gold_price_for_speech()
     if gold <= 0:
-        return "نرخی زێڕ ئێستا بەردەست نییە."
+        return "نرخی زێڕ ئێستا بەردەست نییە، تکایە دووبارە هەوڵ بدەرەوە."
+    rate = load_rate()
     gold_iqd = calculate_gold(gold, rate)
     return f"نرخی زێڕ ئێستا {gold:,.2f} دۆلارە بۆ ئۆنسێک، یان {format_iqd(gold_iqd[21])} دینار بۆ عەیار بیست و یەک."
 
@@ -1364,10 +1378,10 @@ async def main():
             """Plain-text sentence for iOS Shortcuts: fetch this URL, feed
             the raw response straight into a 'Speak Text' action — no JSON
             parsing needed."""
-            return _web.Response(text=build_speak_sentence_en())
+            return _web.Response(text=await build_speak_sentence_en())
 
         async def _speak_ku(request):
-            return _web.Response(text=build_speak_sentence_ku(), charset="utf-8")
+            return _web.Response(text=await build_speak_sentence_ku(), charset="utf-8")
 
         async def _radio_page(request):
             return _web.Response(text=RADIO_HTML, content_type="text/html")

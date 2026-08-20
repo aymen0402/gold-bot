@@ -6,6 +6,11 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import pytz
 import wave
+import base64
+from PIL import Image, ImageDraw, ImageFont
+from pywebpush import webpush, WebPushException
+from py_vapid import Vapid
+from cryptography.hazmat.primitives import serialization
 import struct
 import math
 import io
@@ -49,6 +54,7 @@ ALLOWED_INTERVALS = [5, 10, 15, 20, 30, 60]
 GOLD_RAPID_ALERT_USD = 25
 SILVER_RAPID_ALERT_USD = 1
 REGULAR_PRICE_JOB_ID = "regular_price_update"
+VAPID_KEYS = None  # set once in main() at startup, used by send_price_update() for push alerts
 
 # Market holidays (month, day)
 MARKET_HOLIDAYS = [
@@ -814,6 +820,140 @@ def generate_ambient_tone_wav(seconds=10, freq=196.0, sample_rate=22050, volume=
         wav.writeframes(bytes(frames))
     return buf.getvalue()
 
+# ─── PWA ICON, MANIFEST, PUSH NOTIFICATIONS ────────────────
+
+def generate_app_icon(size):
+    """Simple 'Au' (gold) coin icon, generated with Pillow — no external
+    image file needed."""
+    img = Image.new("RGB", (size, size), "#0d0d0d")
+    draw = ImageDraw.Draw(img)
+    pad = int(size * 0.08)
+    draw.ellipse([pad, pad, size - pad, size - pad], fill="#f5c542")
+    try:
+        font = ImageFont.load_default(size=int(size * 0.42))
+    except TypeError:
+        font = ImageFont.load_default()
+    text = "Au"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]), text, fill="#111", font=font)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+MANIFEST_JSON = """{
+  "name": "زێڕ و زیو - Gold & Silver Kurdistan",
+  "short_name": "زێڕ و زیو",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0d0d0d",
+  "theme_color": "#0d0d0d",
+  "icons": [
+    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}"""
+
+SERVICE_WORKER_JS = """
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data.json(); } catch (e) { data = { title: 'زێڕ و زیو', body: event.data ? event.data.text() : '' }; }
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'زێڕ و زیو', {
+      body: data.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+    })
+  );
+});
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(clients.openWindow('/dashboard'));
+});
+"""
+
+VAPID_FILE = "vapid_keys.json"
+
+def load_or_create_vapid_keys():
+    """Persisted via env vars if you set them (recommended — Render's free
+    disk is ephemeral, so keys generated fresh on every restart invalidate
+    everyone's existing push subscriptions). Auto-generates and prints
+    to logs if not set, as a working fallback."""
+    env_priv = os.environ.get("VAPID_PRIVATE_KEY_PEM")
+    if env_priv:
+        vapid = Vapid()
+        vapid.private_key = serialization.load_pem_private_key(env_priv.encode(), password=None)
+        vapid.public_key = vapid.private_key.public_key()
+        return vapid
+
+    try:
+        with open(VAPID_FILE, "r") as f:
+            data = json.load(f)
+        vapid = Vapid()
+        vapid.private_key = serialization.load_pem_private_key(data["private_pem"].encode(), password=None)
+        vapid.public_key = vapid.private_key.public_key()
+        return vapid
+    except Exception:
+        pass
+
+    vapid = Vapid()
+    vapid.generate_keys()
+    priv_pem = vapid.private_pem().decode() if isinstance(vapid.private_pem(), bytes) else vapid.private_pem()
+    with open(VAPID_FILE, "w") as f:
+        json.dump({"private_pem": priv_pem}, f)
+    print("🔑 Generated new VAPID keys for push notifications.")
+    print("   For persistence across restarts, set this as an env var named VAPID_PRIVATE_KEY_PEM:")
+    print(priv_pem)
+    return vapid
+
+def vapid_public_key_b64url(vapid):
+    pub_raw = vapid.public_key.public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    return base64.urlsafe_b64encode(pub_raw).decode().rstrip("=")
+
+PUSH_SUBS_FILE = "push_subscriptions.json"
+
+def load_push_subscriptions():
+    try:
+        with open(PUSH_SUBS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_push_subscriptions(subs):
+    with open(PUSH_SUBS_FILE, "w") as f:
+        json.dump(subs, f)
+
+def add_push_subscription(sub):
+    subs = load_push_subscriptions()
+    if not any(s.get("endpoint") == sub.get("endpoint") for s in subs):
+        subs.append(sub)
+        save_push_subscriptions(subs)
+
+def send_web_push_to_all(vapid, title, body):
+    """Best-effort — drops any subscription that's gone stale (user
+    uninstalled, browser cleared it, etc.) instead of erroring out."""
+    subs = load_push_subscriptions()
+    still_valid = []
+    for sub in subs:
+        try:
+            webpush(
+                subscription_info=sub,
+                data=json.dumps({"title": title, "body": body}),
+                vapid_private_key=vapid.private_pem().decode() if isinstance(vapid.private_pem(), bytes) else vapid.private_pem(),
+                vapid_claims={"sub": "mailto:admin@example.com"},
+            )
+            still_valid.append(sub)
+        except WebPushException as e:
+            print(f"⚠️ Push subscription dropped (likely expired): {e}")
+        except Exception as e:
+            print(f"⚠️ Push send failed: {e}")
+            still_valid.append(sub)  # keep it, might be a transient error
+    if len(still_valid) != len(subs):
+        save_push_subscriptions(still_valid)
+
 async def fetch_tts_mp3(text, lang):
     """Real server-generated speech audio (Google Translate's TTS endpoint),
     instead of relying on the browser/phone's own installed voices — which
@@ -888,6 +1028,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="زێڕ و زیو">
 <meta name="theme-color" content="#0d0d0d">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <title>زێڕ و زیو | Gold &amp; Silver Kurdistan</title>
 <style>
   * { box-sizing: border-box; }
@@ -895,6 +1037,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --bg: #0d0d0d; --fg: #eee; --card-bg: #161616; --card-border: #2a2a2a;
     --muted: #999; --box-bg: #1f1f1f; --gold: #f5c542; --green: #4ade80;
     --green-bg: #142a17; --red: #f87171; --btn-bg: #1a1a1a; --btn-border: #333;
+  }
+  @media (prefers-color-scheme: light) {
+    html:not([data-theme]) {
+      --bg: #f5f5f7; --fg: #111; --card-bg: #ffffff; --card-border: #e2e2e2;
+      --muted: #666; --box-bg: #f0f0f0; --gold: #b8860b; --green: #16a34a;
+      --green-bg: #dcfce7; --red: #dc2626; --btn-bg: #ffffff; --btn-border: #ddd;
+    }
   }
   [data-theme="light"] {
     --bg: #f5f5f7; --fg: #111; --card-bg: #ffffff; --card-border: #e2e2e2;
@@ -906,9 +1055,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     background: var(--bg); color: var(--fg); margin: 0; padding: 20px 16px 60px;
     transition: background 0.2s, color 0.2s;
   }
-  .theme-switcher {
-    display: flex; justify-content: center; gap: 6px; margin-bottom: 16px;
-  }
+  .theme-switcher { display: flex; justify-content: center; gap: 6px; margin-bottom: 16px; }
   .theme-switcher button {
     padding: 6px 14px; border-radius: 20px; border: 1px solid var(--btn-border);
     background: var(--btn-bg); color: var(--fg); font-size: 0.8em; opacity: 0.6;
@@ -924,7 +1071,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .live-dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; animation: pulse 1.5s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-  .refresh-note { text-align: center; color: var(--muted); font-size: 0.8em; margin: 10px 0 24px; }
   .card {
     background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px;
     padding: 18px 20px; margin: 0 auto 16px; max-width: 420px;
@@ -932,23 +1078,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .card-title { font-size: 1.05em; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
   .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
   .price-oz .label { color: var(--muted); font-size: 0.9em; }
-  .price-oz .value { font-size: 1.6em; font-weight: 700; }
+  .price-oz .value { font-size: 1.6em; font-weight: 700; transition: color 0.4s; }
   .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .ayar-box { background: var(--box-bg); border-radius: 10px; padding: 10px 12px; }
   .ayar-box .name { font-size: 0.8em; color: var(--muted); }
-  .ayar-box .amount { font-size: 1.15em; font-weight: 700; color: var(--gold); }
+  .ayar-box .amount { font-size: 1.15em; font-weight: 700; color: var(--gold); transition: color 0.4s; display: inline-flex; align-items: center; gap: 4px; }
   .ayar-box .unit { font-size: 0.7em; color: var(--muted); }
+  .trend-arrow { font-size: 0.85em; }
+  .trend-up { color: var(--green); }
+  .trend-down { color: var(--red); }
+  .flash-up { animation: flashUp 0.6s ease; }
+  .flash-down { animation: flashDown 0.6s ease; }
+  @keyframes flashUp { 0% { color: var(--green); } 100% { color: inherit; } }
+  @keyframes flashDown { 0% { color: var(--red); } 100% { color: inherit; } }
   .dollar-row { display: flex; justify-content: space-between; align-items: center; }
   .dollar-row .amount { font-size: 1.5em; font-weight: 700; color: var(--green); }
-  .status-line { text-align: center; color: var(--muted); font-size: 0.8em; margin-top: 24px; }
-  .refresh-btn {
-    display: block; margin: 20px auto; padding: 10px 24px; border-radius: 10px;
-    border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--fg); font-size: 0.95em;
-  }
+  .status-line { text-align: center; color: var(--muted); font-size: 0.78em; margin-top: 24px; }
   footer { text-align: center; margin-top: 30px; }
   footer a { color: var(--gold); text-decoration: none; }
   .home-note { text-align: center; color: var(--muted); font-size: 0.78em; margin-top: 20px; line-height: 1.5; }
   .market-closed { color: var(--red); }
+  .notif-btn {
+    display: block; margin: 20px auto 0; padding: 8px 20px; border-radius: 10px;
+    border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--fg); font-size: 0.85em;
+  }
 </style>
 </head>
 <body>
@@ -962,7 +1115,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <h2>زێڕ و زیو — Kurdistan Live Prices</h2>
     <div class="live-badge"><span class="live-dot"></span><span id="liveLabel">LIVE</span></div>
   </div>
-  <div class="refresh-note">نوێکردنەوەی داهاتوو: <span id="countdown">1</span>s</div>
 
   <div class="card">
     <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
@@ -995,7 +1147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
-  <button class="refresh-btn" onclick="fetchPrices()">🔄 نوێکردنەوە — Refresh Now</button>
+  <button class="notif-btn" id="notifBtn" onclick="enablePush()">🔔 چالاککردنی ئاگادارکردنەوە — Enable price alerts</button>
 
   <footer>
     <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
@@ -1007,8 +1159,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <script>
 // Only show the "add to home screen" tip if we're NOT already running
-// as an installed standalone app (covers both iOS Safari's
-// navigator.standalone and the standard PWA display-mode check).
+// as an installed standalone app.
 const isStandalone = window.navigator.standalone === true ||
                       window.matchMedia('(display-mode: standalone)').matches;
 if (isStandalone) {
@@ -1033,42 +1184,98 @@ function setTheme(mode) {
 }
 applyTheme(localStorage.getItem('themeMode') || 'auto');
 
-// --- Live price refresh, every 1 second ---
+// --- Push notifications ---
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+async function enablePush() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      document.getElementById('statusLine').innerText = 'Push not supported on this browser.';
+      return;
+    }
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      document.getElementById('statusLine').innerText = 'Notification permission denied.';
+      return;
+    }
+    const vapidKey = await (await fetch('/vapid-public-key')).text();
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(vapidKey),
+    });
+    await fetch('/subscribe-push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub),
+    });
+    document.getElementById('notifBtn').innerText = '✅ ئاگادارکردنەوە چالاکە — Alerts enabled';
+    document.getElementById('notifBtn').disabled = true;
+  } catch (e) {
+    document.getElementById('statusLine').innerText = 'Push setup failed: ' + e;
+  }
+}
+
+// --- Live price refresh, every 1 second, with trend arrows + flash ---
 const REFRESH_SECONDS = 1;
-let countdown = REFRESH_SECONDS;
+let lastValues = {};
 
 function fmtIQD(n) {
   if (!n) return '—';
   return Math.round(n).toLocaleString();
 }
 
+function setValue(id, newText, rawValue) {
+  const el = document.getElementById(id);
+  const prev = lastValues[id];
+  el.innerText = newText;
+  if (prev !== undefined && rawValue !== undefined && prev !== rawValue) {
+    el.classList.remove('flash-up', 'flash-down');
+    void el.offsetWidth; // restart animation
+    el.classList.add(rawValue > prev ? 'flash-up' : 'flash-down');
+  }
+  if (rawValue !== undefined) lastValues[id] = rawValue;
+}
+
+function setAyarValue(id, formatted, rawValue) {
+  const el = document.getElementById(id);
+  const prev = lastValues[id];
+  let arrow = '';
+  if (prev !== undefined && rawValue !== undefined && prev !== rawValue) {
+    arrow = rawValue > prev
+      ? '<span class="trend-arrow trend-up">▲</span>'
+      : '<span class="trend-arrow trend-down">▼</span>';
+  }
+  el.innerHTML = formatted + arrow;
+  if (rawValue !== undefined) lastValues[id] = rawValue;
+}
+
 async function fetchPrices() {
   try {
     const res = await fetch('/price?t=' + Date.now());
     const d = await res.json();
-    document.getElementById('goldOz').innerText = d.gold_usd_oz ? '$' + d.gold_usd_oz.toFixed(2) : 'Loading...';
-    document.getElementById('ayar24').innerText = fmtIQD(d.gold_iqd['24']);
-    document.getElementById('ayar22').innerText = fmtIQD(d.gold_iqd['22']);
-    document.getElementById('ayar21').innerText = fmtIQD(d.gold_iqd['21']);
-    document.getElementById('ayar18').innerText = fmtIQD(d.gold_iqd['18']);
-    document.getElementById('silverOz').innerText = d.silver_usd_oz ? '$' + d.silver_usd_oz.toFixed(2) : '—';
-    document.getElementById('silverKg').innerText = d.silver_usd_kg ? '$' + fmtIQD(d.silver_usd_kg) : '—';
-    document.getElementById('dollarRate').innerText = fmtIQD(d.usd_iqd_per_100) + ' د.ع';
+    setValue('goldOz', d.gold_usd_oz ? '$' + d.gold_usd_oz.toFixed(2) : 'Loading...', d.gold_usd_oz);
+    setAyarValue('ayar24', d.gold_iqd_formatted['24'] || '—', d.gold_iqd['24']);
+    setAyarValue('ayar22', d.gold_iqd_formatted['22'] || '—', d.gold_iqd['22']);
+    setAyarValue('ayar21', d.gold_iqd_formatted['21'] || '—', d.gold_iqd['21']);
+    setAyarValue('ayar18', d.gold_iqd_formatted['18'] || '—', d.gold_iqd['18']);
+    setValue('silverOz', d.silver_usd_oz ? '$' + d.silver_usd_oz.toFixed(2) : '—', d.silver_usd_oz);
+    setValue('silverKg', d.silver_usd_kg ? '$' + fmtIQD(d.silver_usd_kg) : '—', d.silver_usd_kg);
+    setValue('dollarRate', fmtIQD(d.usd_iqd_per_100) + ' د.ع', d.usd_iqd_per_100);
     document.getElementById('liveLabel').innerText = d.market_open ? 'LIVE' : 'MARKET CLOSED';
     document.getElementById('liveLabel').className = d.market_open ? '' : 'market-closed';
     document.getElementById('statusLine').innerText = 'نوێکراوەتەوە: ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('statusLine').innerText = 'هەڵە لە وەرگرتنی نرخ: ' + e;
   }
-  countdown = REFRESH_SECONDS;
 }
 
-setInterval(() => {
-  countdown--;
-  document.getElementById('countdown').innerText = countdown;
-  if (countdown <= 0) fetchPrices();
-}, 1000);
-
+setInterval(fetchPrices, REFRESH_SECONDS * 1000);
 fetchPrices();
 </script>
 </body>
@@ -1375,9 +1582,17 @@ async def send_price_update(bot, message_type="regular"):
             if abs(gold_oz - last["gold"]) >= GOLD_RAPID_ALERT_USD:
                 alert = build_alert_message("gold", last["gold"], gold_oz)
                 await bot.send_message(chat_id=CHANNEL_ID, text=alert)
+                if VAPID_KEYS:
+                    direction = "up" if gold_oz > last["gold"] else "down"
+                    send_web_push_to_all(VAPID_KEYS, "🚨 Gold price alert",
+                                          f"Gold is {direction} — now ${gold_oz:,.2f}")
             if abs(silver_oz - last["silver"]) >= SILVER_RAPID_ALERT_USD:
                 alert = build_alert_message("silver", last["silver"], silver_oz)
                 await bot.send_message(chat_id=CHANNEL_ID, text=alert)
+                if VAPID_KEYS:
+                    direction = "up" if silver_oz > last["silver"] else "down"
+                    send_web_push_to_all(VAPID_KEYS, "🚨 Silver price alert",
+                                          f"Silver is {direction} — now ${silver_oz:,.2f}")
 
         gold_iqd = calculate_gold(gold_oz, usd_iqd)
         message = build_regular_message(gold_oz, silver_oz, usd_iqd, gold_iqd,
@@ -1677,6 +1892,8 @@ async def main():
                 return _web.Response(status=502, text="TTS failed")
 
         _music_cache = {"bytes": None}
+        global VAPID_KEYS
+        VAPID_KEYS = load_or_create_vapid_keys()
 
         async def _background_music(request):
             """Fetches the music file you uploaded to GitHub and serves it
@@ -1717,6 +1934,7 @@ async def main():
                 "usd_iqd": rate,
                 "usd_iqd_per_100": rate * 100,
                 "gold_iqd": {str(k): v for k, v in gold_iqd.items()},
+                "gold_iqd_formatted": {str(k): format_iqd(v) for k, v in gold_iqd.items()},
                 "updated_at": meta.get("updated_at", ""),
                 "market_open": is_market_open(),
             }
@@ -1726,6 +1944,36 @@ async def main():
 
         async def _dashboard_page(request):
             return _web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+        async def _manifest_json(request):
+            return _web.Response(text=MANIFEST_JSON, content_type="application/manifest+json")
+
+        async def _service_worker(request):
+            return _web.Response(text=SERVICE_WORKER_JS, content_type="application/javascript")
+
+        _icon_cache = {}
+
+        async def _icon(request, size):
+            if size not in _icon_cache:
+                _icon_cache[size] = generate_app_icon(size)
+            return _web.Response(body=_icon_cache[size], content_type="image/png")
+
+        async def _icon_192(request):
+            return await _icon(request, 192)
+
+        async def _icon_512(request):
+            return await _icon(request, 512)
+
+        async def _vapid_public_key(request):
+            return _web.Response(text=vapid_public_key_b64url(VAPID_KEYS))
+
+        async def _subscribe_push(request):
+            try:
+                sub = await request.json()
+                add_push_subscription(sub)
+                return _web.json_response({"ok": True})
+            except Exception as e:
+                return _web.json_response({"ok": False, "error": str(e)}, status=400)
 
         _health_app = _web.Application()
         _health_app.router.add_get("/", _health)
@@ -1737,6 +1985,12 @@ async def main():
         _health_app.router.add_get("/radio", _radio_page)
         _health_app.router.add_get("/price", _price_json)
         _health_app.router.add_get("/dashboard", _dashboard_page)
+        _health_app.router.add_get("/manifest.json", _manifest_json)
+        _health_app.router.add_get("/sw.js", _service_worker)
+        _health_app.router.add_get("/icon-192.png", _icon_192)
+        _health_app.router.add_get("/icon-512.png", _icon_512)
+        _health_app.router.add_get("/vapid-public-key", _vapid_public_key)
+        _health_app.router.add_post("/subscribe-push", _subscribe_push)
         _runner = _web.AppRunner(_health_app)
         await _runner.setup()
         await _web.TCPSite(_runner, "0.0.0.0", int(port)).start()

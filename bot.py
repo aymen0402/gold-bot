@@ -1275,7 +1275,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   body {
     font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
-    background: var(--bg); color: var(--fg); margin: 0; padding: 20px 16px 60px;
+    background: var(--bg); color: var(--fg); margin: 0; padding: 20px 16px 90px;
     transition: background 0.2s, color 0.2s;
   }
   .theme-switcher { display: flex; justify-content: center; gap: 6px; margin-bottom: 16px; }
@@ -1307,10 +1307,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
   .price-oz .label { color: var(--muted); font-size: 0.9em; }
   .price-oz .value { font-size: 1.6em; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .sparkline { width: 100%; height: 120px; display: block; margin-bottom: 6px; }
+  .sparkline { width: 100%; height: 220px; display: block; margin-bottom: 6px; }
   .chart-range-switch { display: flex; gap: 6px; margin-bottom: 10px; }
-  .chart-range-switch button { flex: 1; padding: 6px; font-size: 0.8em; }
-  .chart-note { text-align: center; color: var(--muted); font-size: 0.75em; margin-bottom: 14px; }
+  .chart-range-switch button { flex: 1; padding: 8px; font-size: 0.85em; }
+  .chart-note { text-align: center; color: var(--muted); font-size: 0.75em; margin-bottom: 4px; }
   .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .ayar-box { background: var(--box-bg); border-radius: 10px; padding: 10px 12px; }
   .ayar-box .name { font-size: 0.8em; color: var(--muted); }
@@ -1351,6 +1351,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .calc-row .calc-label { color: var(--muted); }
   .calc-row .calc-value { font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; }
+
+  /* --- Tab navigation --- */
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .bottom-nav {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+    display: flex; background: var(--card-bg); border-top: 1px solid var(--card-border);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+  }
+  .bottom-nav button {
+    flex: 1; background: none; border: none; color: var(--muted);
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 6px 2px; font-size: 0.7em;
+  }
+  .bottom-nav button .nav-icon { font-size: 1.3em; }
+  .bottom-nav button.active { color: var(--gold); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -1365,104 +1381,140 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="live-badge"><span class="live-dot"></span><span id="liveLabel">LIVE</span></div>
   </div>
 
-  <div class="card" id="goldCard">
-    <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
-    <div class="price-oz">
-      <span class="label">1 oz (ئۆنسێک)</span>
-      <span class="value" id="goldOz">Loading...</span>
-    </div>
-    <div class="chart-range-switch">
-      <button id="rangeToday" class="calc-mode active" onclick="setChartRange('24h')">ئەمڕۆ — Today</button>
-      <button id="range7d" class="calc-mode" onclick="setChartRange('7d')">هەفتە — Week</button>
-      <button id="range30d" class="calc-mode" onclick="setChartRange('30d')">مانگ — Month</button>
-    </div>
-    <canvas class="sparkline" id="sparkline"></canvas>
-    <div class="chart-note" id="chartNote"></div>
-    <div class="ayar-grid">
-      <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
-      <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
-      <div class="ayar-box"><div class="name">عەیار ٢١ — Ayar 21</div><div class="amount" id="ayar21">—</div><div class="unit">IQD / مثقال</div></div>
-      <div class="ayar-box"><div class="name">عەیار ١٨ — Ayar 18</div><div class="amount" id="ayar18">—</div><div class="unit">IQD / مثقال</div></div>
-    </div>
-  </div>
-
-  <div class="card" id="silverCard">
-    <div class="card-title">🥈 Silver Prices نرخی زیو</div>
-    <div class="ayar-grid">
-      <div class="ayar-box"><div class="name">Per oz — ئۆنسێک</div><div class="amount" id="silverOz">—</div></div>
-      <div class="ayar-box"><div class="name">Per kg — یەک کیلۆ</div><div class="amount" id="silverKg">—</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">💵 Dollar Rate نرخی دۆلار</div>
-    <div class="dollar-row">
-      <span class="label">100 دۆلار — USD 100</span>
-      <span class="amount" id="dollarRate">—</span>
-    </div>
-  </div>
-
-  <div class="card" id="tomanCard" style="display:none">
-    <div class="card-title">🇮🇷 Toman Rate نرخی تمەن</div>
-    <div class="dollar-row">
-      <span class="label">1 دۆلار — USD 1</span>
-      <span class="amount" id="tomanRate">—</span>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">📅 پوختەی هەفتانە — Weekly Summary</div>
-    <div class="ayar-grid">
-      <div class="ayar-box"><div class="name">کردنەوە — Open</div><div class="amount" id="weekOpen">—</div></div>
-      <div class="ayar-box"><div class="name">داخستن — Close</div><div class="amount" id="weekClose">—</div></div>
-      <div class="ayar-box"><div class="name">بەرزترین — High</div><div class="amount" id="weekHigh">—</div></div>
-      <div class="ayar-box"><div class="name">نزمترین — Low</div><div class="amount" id="weekLow">—</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">🧮 حیسابکەر — Calculator</div>
-    <div class="calc-mode-switch">
-      <button id="calcTabMoney" class="calc-mode active" onclick="setCalcTab('money')">💰 پارە — Money</button>
-      <button id="calcTabWeight" class="calc-mode" onclick="setCalcTab('weight')">⚖️ کێش — Weight</button>
-    </div>
-
-    <div id="calcMoneyPanel">
-      <div class="calc-mode-switch">
-        <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
-        <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
+  <!-- ═══ TAB: Prices ═══ -->
+  <div class="tab-panel active" id="tab-prices">
+    <div class="card" id="goldCard">
+      <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
+      <div class="price-oz">
+        <span class="label">1 oz (ئۆنسێک)</span>
+        <span class="value" id="goldOz">Loading...</span>
       </div>
-      <input type="number" inputmode="decimal" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
-      <div id="calcResults" class="calc-results"></div>
-    </div>
-
-    <div id="calcWeightPanel" style="display:none">
-      <div class="calc-mode-switch">
-        <button id="calcUnitMithqal" class="calc-mode active" onclick="setCalcUnit('mithqal')">مثقال</button>
-        <button id="calcUnitGram" class="calc-mode" onclick="setCalcUnit('gram')">گرام — Gram</button>
+      <div class="ayar-grid">
+        <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
+        <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
+        <div class="ayar-box"><div class="name">عەیار ٢١ — Ayar 21</div><div class="amount" id="ayar21">—</div><div class="unit">IQD / مثقال</div></div>
+        <div class="ayar-box"><div class="name">عەیار ١٨ — Ayar 18</div><div class="amount" id="ayar18">—</div><div class="unit">IQD / مثقال</div></div>
       </div>
-      <input type="number" inputmode="decimal" id="calcWeightInput" class="calc-input" placeholder="بۆ نموونە: 10" oninput="runWeightCalculator()">
-      <div id="calcWeightResults" class="calc-results"></div>
+    </div>
+
+    <div class="card" id="silverCard">
+      <div class="card-title">🥈 Silver Prices نرخی زیو</div>
+      <div class="ayar-grid">
+        <div class="ayar-box"><div class="name">Per oz — ئۆنسێک</div><div class="amount" id="silverOz">—</div></div>
+        <div class="ayar-box"><div class="name">Per kg — یەک کیلۆ</div><div class="amount" id="silverKg">—</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">💵 Dollar Rate نرخی دۆلار</div>
+      <div class="dollar-row">
+        <span class="label">100 دۆلار — USD 100</span>
+        <span class="amount" id="dollarRate">—</span>
+      </div>
+    </div>
+
+    <div class="card" id="tomanCard" style="display:none">
+      <div class="card-title">🇮🇷 Toman Rate نرخی تمەن</div>
+      <div class="dollar-row">
+        <span class="label">1 دۆلار — USD 1</span>
+        <span class="amount" id="tomanRate">—</span>
+      </div>
     </div>
   </div>
 
-  <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
-  <button class="notif-btn" id="notifBtn" onclick="enablePush()">🔔 چالاککردنی ئاگادارکردنەوە — Enable price alerts</button>
-
-  <div style="text-align:center; margin-top:24px;">
-    <img src="/qr-code.png" alt="QR code" style="width:120px; height:120px; border-radius:12px; background:#fff; padding:8px;">
-    <div class="status-line">سکان بکە بۆ کردنەوەی ئەم پەڕەیە — Scan to open</div>
+  <!-- ═══ TAB: Chart ═══ -->
+  <div class="tab-panel" id="tab-chart">
+    <div class="card">
+      <div class="card-title">📈 Gold Chart داهاتووی نرخ</div>
+      <div class="price-oz">
+        <span class="label">1 oz (ئۆنسێک)</span>
+        <span class="value" id="goldOzChart">—</span>
+      </div>
+      <div class="chart-range-switch">
+        <button id="rangeToday" class="calc-mode active" onclick="setChartRange('24h')">ئەمڕۆ — Today</button>
+        <button id="range7d" class="calc-mode" onclick="setChartRange('7d')">هەفتە — Week</button>
+        <button id="range30d" class="calc-mode" onclick="setChartRange('30d')">مانگ — Month</button>
+      </div>
+      <canvas class="sparkline" id="sparkline"></canvas>
+      <div class="chart-note" id="chartNote"></div>
+    </div>
   </div>
 
-  <footer>
-    <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
-  </footer>
-  <div class="home-note" id="homeNote">
-    📲 <b>Add to Home Screen:</b> tap Share → "Add to Home Screen"<br>
-    بیخەرە سەر شاشەی مۆبایل: Share → Add to Home Screen
+  <!-- ═══ TAB: Calculator ═══ -->
+  <div class="tab-panel" id="tab-calculator">
+    <div class="card">
+      <div class="card-title">🧮 حیسابکەر — Calculator</div>
+      <div class="calc-mode-switch">
+        <button id="calcTabMoney" class="calc-mode active" onclick="setCalcTab('money')">💰 پارە — Money</button>
+        <button id="calcTabWeight" class="calc-mode" onclick="setCalcTab('weight')">⚖️ کێش — Weight</button>
+      </div>
+
+      <div id="calcMoneyPanel">
+        <div class="calc-mode-switch">
+          <button id="calcModeUsd" class="calc-mode active" onclick="setCalcMode('usd')">$ دۆلار</button>
+          <button id="calcModeIqd" class="calc-mode" onclick="setCalcMode('iqd')">د.ع دینار</button>
+        </div>
+        <input type="number" inputmode="decimal" id="calcInput" class="calc-input" placeholder="بۆ نموونە: 10000" oninput="runCalculator()">
+        <div id="calcResults" class="calc-results"></div>
+      </div>
+
+      <div id="calcWeightPanel" style="display:none">
+        <div class="calc-mode-switch">
+          <button id="calcUnitMithqal" class="calc-mode active" onclick="setCalcUnit('mithqal')">مثقال</button>
+          <button id="calcUnitGram" class="calc-mode" onclick="setCalcUnit('gram')">گرام — Gram</button>
+        </div>
+        <input type="number" inputmode="decimal" id="calcWeightInput" class="calc-input" placeholder="بۆ نموونە: 10" oninput="runWeightCalculator()">
+        <div id="calcWeightResults" class="calc-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TAB: More ═══ -->
+  <div class="tab-panel" id="tab-more">
+    <div class="card">
+      <div class="card-title">📅 پوختەی هەفتانە — Weekly Summary</div>
+      <div class="ayar-grid">
+        <div class="ayar-box"><div class="name">کردنەوە — Open</div><div class="amount" id="weekOpen">—</div></div>
+        <div class="ayar-box"><div class="name">داخستن — Close</div><div class="amount" id="weekClose">—</div></div>
+        <div class="ayar-box"><div class="name">بەرزترین — High</div><div class="amount" id="weekHigh">—</div></div>
+        <div class="ayar-box"><div class="name">نزمترین — Low</div><div class="amount" id="weekLow">—</div></div>
+      </div>
+    </div>
+
+    <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
+    <button class="notif-btn" id="notifBtn" onclick="enablePush()">🔔 چالاککردنی ئاگادارکردنەوە — Enable price alerts</button>
+
+    <div style="text-align:center; margin-top:24px;">
+      <img src="/qr-code.png" alt="QR code" style="width:120px; height:120px; border-radius:12px; background:#fff; padding:8px;">
+      <div class="status-line">سکان بکە بۆ کردنەوەی ئەم پەڕەیە — Scan to open</div>
+    </div>
+
+    <footer>
+      <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
+    </footer>
+    <div class="home-note" id="homeNote">
+      📲 <b>Add to Home Screen:</b> tap Share → "Add to Home Screen"<br>
+      بیخەرە سەر شاشەی مۆبایل: Share → Add to Home Screen
+    </div>
+  </div>
+
+  <!-- ═══ Bottom Tab Navigation ═══ -->
+  <div class="bottom-nav">
+    <button id="navPrices" class="active" onclick="showTab('prices')"><span class="nav-icon">🏅</span>نرخەکان</button>
+    <button id="navChart" onclick="showTab('chart')"><span class="nav-icon">📈</span>چارت</button>
+    <button id="navCalculator" onclick="showTab('calculator')"><span class="nav-icon">🧮</span>حیسابکەر</button>
+    <button id="navMore" onclick="showTab('more')"><span class="nav-icon">☰</span>زیاتر</button>
   </div>
 
 <script>
+function showTab(name) {
+  ['prices', 'chart', 'calculator', 'more'].forEach(t => {
+    document.getElementById('tab-' + t).className = 'tab-panel' + (t === name ? ' active' : '');
+    document.getElementById('nav' + t.charAt(0).toUpperCase() + t.slice(1)).className = (t === name ? 'active' : '');
+  });
+  if (name === 'chart') drawSparkline();
+}
+
 const isStandalone = window.navigator.standalone === true ||
                       window.matchMedia('(display-mode: standalone)').matches;
 if (isStandalone) document.getElementById('homeNote').style.display = 'none';
@@ -1549,6 +1601,7 @@ const lastRaw = {};
 
 function updateDollarValue(id, newRaw, prefix, suffix, decimals) {
   const el = document.getElementById(id);
+  if (!el) return;
   const prevRaw = lastRaw[id];
   const render = (v) => (decimals ? v.toFixed(decimals) : fmtIQD(v));
   if (prevRaw === undefined) {
@@ -1565,6 +1618,7 @@ function updateDollarValue(id, newRaw, prefix, suffix, decimals) {
 
 function updateAyarValue(id, newRaw) {
   const el = document.getElementById(id);
+  if (!el) return;
   const prevRaw = lastRaw[id];
   let arrowHtml = '';
   if (prevRaw !== undefined && prevRaw !== newRaw) {
@@ -1625,7 +1679,6 @@ function pushSparkPoint(value) {
   const last = chartPoints[chartPoints.length - 1];
   if (!last || last.g !== value) {
     chartPoints.push({ t: new Date().toISOString(), g: value });
-    // Keep the live-appended tail from growing forever within one session
     if (chartPoints.length > 500) chartPoints.shift();
   }
   drawSparkline();
@@ -1637,6 +1690,7 @@ function drawSparkline() {
   if (!canvas || values.length < 2) return;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
   canvas.width = w * dpr; canvas.height = h * dpr;
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
@@ -1655,7 +1709,6 @@ function drawSparkline() {
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   });
   ctx.stroke();
-  // Light fill under the line for a more "chart-like" look
   ctx.lineTo(w, h);
   ctx.lineTo(0, h);
   ctx.closePath();
@@ -1671,6 +1724,7 @@ async function fetchPrices() {
     if (d.gold_usd_oz) {
       const prevGold = lastRaw['goldOz'];
       updateDollarValue('goldOz', d.gold_usd_oz, '$', '', 2);
+      updateDollarValue('goldOzChart', d.gold_usd_oz, '$', '', 2);
       pushSparkPoint(d.gold_usd_oz);
       if (prevGold !== undefined && prevGold !== d.gold_usd_oz) pulseCard('goldCard', d.gold_usd_oz > prevGold);
     }
@@ -1706,6 +1760,7 @@ async function fetchPrices() {
 
     latestPrices = d;
     runCalculator();
+    runWeightCalculator();
   } catch (e) {
     document.getElementById('statusLine').innerText = 'هەڵە لە وەرگرتنی نرخ: ' + e;
   }
@@ -2103,6 +2158,20 @@ def update_week_data(gold, silver, gold_iqd=None):
     return data
 
 # ─── MAIN SEND FUNCTIONS ──────────────────────────────────
+
+async def sample_chart_point():
+    """Runs every 5 minutes, silently — just records a data point for the
+    dashboard chart. Does NOT send any Telegram message (that's what
+    send_price_update does, on its own 30-min schedule). This is what
+    makes the chart actually look 'alive' within an hour instead of
+    needing many 30-min cycles to accumulate visible movement."""
+    if not is_market_open():
+        return
+    try:
+        gold, silver = await get_metals_prices()
+        await append_price_history(gold, silver)
+    except Exception as e:
+        print(f"⚠️ Chart sampling failed: {e}")
 
 async def send_price_update(bot, message_type="regular"):
     if not is_market_open() and message_type == "regular":
@@ -2621,6 +2690,7 @@ async def main():
     # Special market notices are checked every minute. Price updates use the admin interval.
     scheduler.add_job(scheduled_check, CronTrigger(minute="*"), args=[app.bot])
     scheduler.add_job(check_economic_event_alerts, CronTrigger(minute="*"), args=[app.bot])
+    scheduler.add_job(sample_chart_point, CronTrigger(minute="*/5"))
     saved_interval = load_interval()
     if saved_interval not in ALLOWED_INTERVALS:
         saved_interval = DEFAULT_INTERVAL

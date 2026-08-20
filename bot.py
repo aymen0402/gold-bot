@@ -863,6 +863,150 @@ async def build_speak_sentence_fa():
         return "قیمت طلا در حال حاضر در دسترس نیست."
     return f"قیمت طلا اکنون {round(gold):,} دلار است."
 
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="ckb" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="زێڕ و زیو">
+<meta name="theme-color" content="#0d0d0d">
+<title>زێڕ و زیو | Gold &amp; Silver Kurdistan</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Tahoma, sans-serif;
+    background: #0d0d0d; color: #eee; margin: 0; padding: 20px 16px 60px;
+  }
+  .header { text-align: center; margin-bottom: 24px; }
+  .header h1 { font-size: 1.1em; color: #888; margin: 0 0 4px; letter-spacing: 2px; }
+  .header h2 { font-size: 1.4em; margin: 0; }
+  .live-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #142a17; color: #4ade80; padding: 4px 12px; border-radius: 20px;
+    font-size: 0.8em; margin-top: 10px;
+  }
+  .live-dot { width: 8px; height: 8px; background: #4ade80; border-radius: 50%; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .refresh-note { text-align: center; color: #666; font-size: 0.8em; margin: 10px 0 24px; }
+  .card {
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 16px;
+    padding: 18px 20px; margin: 0 auto 16px; max-width: 420px;
+  }
+  .card-title { font-size: 1.05em; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .price-oz { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .price-oz .label { color: #999; font-size: 0.9em; }
+  .price-oz .value { font-size: 1.6em; font-weight: 700; }
+  .ayar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ayar-box { background: #1f1f1f; border-radius: 10px; padding: 10px 12px; }
+  .ayar-box .name { font-size: 0.8em; color: #999; }
+  .ayar-box .amount { font-size: 1.15em; font-weight: 700; color: #f5c542; }
+  .ayar-box .unit { font-size: 0.7em; color: #777; }
+  .dollar-row { display: flex; justify-content: space-between; align-items: center; }
+  .dollar-row .amount { font-size: 1.5em; font-weight: 700; color: #4ade80; }
+  .status-line { text-align: center; color: #666; font-size: 0.8em; margin-top: 24px; }
+  .refresh-btn {
+    display: block; margin: 20px auto; padding: 10px 24px; border-radius: 10px;
+    border: 1px solid #333; background: #1a1a1a; color: #eee; font-size: 0.95em;
+  }
+  footer { text-align: center; margin-top: 30px; }
+  footer a { color: #f5c542; text-decoration: none; }
+  .home-note { text-align: center; color: #666; font-size: 0.78em; margin-top: 20px; line-height: 1.5; }
+  .market-closed { color: #f87171; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>GOLD &amp; SILVER</h1>
+    <h2>زێڕ و زیو — Kurdistan Live Prices</h2>
+    <div class="live-badge"><span class="live-dot"></span><span id="liveLabel">LIVE</span></div>
+  </div>
+  <div class="refresh-note">نوێکردنەوەی داهاتوو: <span id="countdown">10</span>s</div>
+
+  <div class="card">
+    <div class="card-title">🏅 Gold Prices نرخی زێڕ</div>
+    <div class="price-oz">
+      <span class="label">1 oz (ئۆنسێک)</span>
+      <span class="value" id="goldOz">Loading...</span>
+    </div>
+    <div class="ayar-grid">
+      <div class="ayar-box"><div class="name">عەیار ٢٤ — Ayar 24</div><div class="amount" id="ayar24">—</div><div class="unit">IQD / مثقال</div></div>
+      <div class="ayar-box"><div class="name">عەیار ٢٢ — Ayar 22</div><div class="amount" id="ayar22">—</div><div class="unit">IQD / مثقال</div></div>
+      <div class="ayar-box"><div class="name">عەیار ٢١ — Ayar 21</div><div class="amount" id="ayar21">—</div><div class="unit">IQD / مثقال</div></div>
+      <div class="ayar-box"><div class="name">عەیار ١٨ — Ayar 18</div><div class="amount" id="ayar18">—</div><div class="unit">IQD / مثقال</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🥈 Silver Prices نرخی زیو</div>
+    <div class="ayar-grid">
+      <div class="ayar-box"><div class="name">Per oz — ئۆنسێک</div><div class="amount" id="silverOz">—</div></div>
+      <div class="ayar-box"><div class="name">Per kg — یەک کیلۆ</div><div class="amount" id="silverKg">—</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">💵 Dollar Rate نرخی دۆلار</div>
+    <div class="dollar-row">
+      <span class="label">100 دۆلار — USD 100</span>
+      <span class="amount" id="dollarRate">—</span>
+    </div>
+  </div>
+
+  <div class="status-line" id="statusLine">چاوەڕێی نرخەکان...</div>
+  <button class="refresh-btn" onclick="fetchPrices()">🔄 نوێکردنەوە — Refresh Now</button>
+
+  <footer>
+    <a href="https://t.me/nrxitala" target="_blank">✈️ کەناڵەکەمان — Join our Channel</a>
+  </footer>
+  <div class="home-note">
+    📲 <b>Add to Home Screen:</b> tap Share → "Add to Home Screen"<br>
+    بیخەرە سەر شاشەی مۆبایل: Share → Add to Home Screen
+  </div>
+
+<script>
+const REFRESH_SECONDS = 10;
+let countdown = REFRESH_SECONDS;
+
+function fmtIQD(n) {
+  if (!n) return '—';
+  return Math.round(n).toLocaleString();
+}
+
+async function fetchPrices() {
+  try {
+    const res = await fetch('/price?t=' + Date.now());
+    const d = await res.json();
+    document.getElementById('goldOz').innerText = d.gold_usd_oz ? '$' + d.gold_usd_oz.toFixed(2) : 'Loading...';
+    document.getElementById('ayar24').innerText = fmtIQD(d.gold_iqd['24']);
+    document.getElementById('ayar22').innerText = fmtIQD(d.gold_iqd['22']);
+    document.getElementById('ayar21').innerText = fmtIQD(d.gold_iqd['21']);
+    document.getElementById('ayar18').innerText = fmtIQD(d.gold_iqd['18']);
+    document.getElementById('silverOz').innerText = d.silver_usd_oz ? '$' + d.silver_usd_oz.toFixed(2) : '—';
+    document.getElementById('silverKg').innerText = d.silver_usd_kg ? '$' + fmtIQD(d.silver_usd_kg) : '—';
+    document.getElementById('dollarRate').innerText = fmtIQD(d.usd_iqd_per_100) + ' د.ع';
+    document.getElementById('liveLabel').innerText = d.market_open ? 'LIVE' : 'MARKET CLOSED';
+    document.getElementById('liveLabel').className = d.market_open ? '' : 'market-closed';
+    document.getElementById('statusLine').innerText = 'نوێکراوەتەوە: ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('statusLine').innerText = 'هەڵە لە وەرگرتنی نرخ: ' + e;
+  }
+  countdown = REFRESH_SECONDS;
+}
+
+setInterval(() => {
+  countdown--;
+  document.getElementById('countdown').innerText = countdown;
+  if (countdown <= 0) fetchPrices();
+}, 1000);
+
+fetchPrices();
+</script>
+</body>
+</html>
+"""
+
 RADIO_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1492,14 +1636,30 @@ async def main():
             return _web.Response(text=RADIO_HTML, content_type="text/html")
 
         async def _price_json(request):
-            """JSON version, in case you want the raw numbers instead."""
+            """Full price breakdown for the /dashboard page (and anyone
+            else who wants raw numbers)."""
             last = load_last_prices()
             rate = load_rate()
-            return _web.json_response({
-                "gold_usd_oz": last.get("gold", 0),
-                "silver_usd_oz": last.get("silver", 0),
+            gold = last.get("gold", 0)
+            silver = last.get("silver", 0)
+            gold_iqd = calculate_gold(gold, rate) if gold > 0 else {24: 0, 22: 0, 21: 0, 18: 0}
+            meta = load_rate_meta()
+            data = {
+                "gold_usd_oz": gold,
+                "silver_usd_oz": silver,
+                "silver_usd_kg": calculate_silver_usd(silver) if silver > 0 else 0,
                 "usd_iqd": rate,
-            })
+                "usd_iqd_per_100": rate * 100,
+                "gold_iqd": {str(k): v for k, v in gold_iqd.items()},
+                "updated_at": meta.get("updated_at", ""),
+                "market_open": is_market_open(),
+            }
+            resp = _web.json_response(data)
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp
+
+        async def _dashboard_page(request):
+            return _web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
         _health_app = _web.Application()
         _health_app.router.add_get("/", _health)
@@ -1510,6 +1670,7 @@ async def main():
         _health_app.router.add_get("/background-music.mp3", _background_music)
         _health_app.router.add_get("/radio", _radio_page)
         _health_app.router.add_get("/price", _price_json)
+        _health_app.router.add_get("/dashboard", _dashboard_page)
         _runner = _web.AppRunner(_health_app)
         await _runner.setup()
         await _web.TCPSite(_runner, "0.0.0.0", int(port)).start()

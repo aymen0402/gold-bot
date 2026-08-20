@@ -345,7 +345,7 @@ async def fetch_usd_toman_rate():
         ) as resp:
             resp.raise_for_status()
             html = await resp.text()
-    m = _re.search(r"USD.{0,80}?([\d,]{5,7})", html, _re.DOTALL)
+    m = _re.search(r"USD(?!T)\b.{0,80}?([\d,]{5,7})", html, _re.DOTALL)
     if not m:
         raise RuntimeError("USD/Toman rate not found on bon-bast.com — page format may have changed")
     rate = float(m.group(1).replace(",", ""))

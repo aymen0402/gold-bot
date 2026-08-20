@@ -2186,10 +2186,22 @@ async def main():
             else who wants raw numbers)."""
             gold, silver = await get_metals_for_display()
             rate = load_rate()
+            # Live-fetch Toman if we don't have one cached yet (same
+            # "fresh Render deploy = empty disk" issue as gold/silver).
             toman_rate = load_toman_rate()
+            if toman_rate <= 0:
+                try:
+                    toman_rate = await get_usd_toman_rate()
+                except Exception as e:
+                    print(f"⚠️ Toman rate live-fetch for /price failed: {e}")
             gold_iqd = calculate_gold(gold, rate) if gold > 0 else {24: 0, 22: 0, 21: 0, 18: 0}
             meta = load_rate_meta()
             week = load_week_data()
+            # Seed the weekly tracker immediately if it's empty (fresh
+            # deploy, before the 30-min scheduled job has run yet) —
+            # otherwise the summary card sits blank for up to 30 minutes.
+            if week.get("open_gold", 0) <= 0 and gold > 0:
+                week = update_week_data(gold, silver, gold_iqd)
             data = {
                 "gold_usd_oz": gold,
                 "silver_usd_oz": silver,
